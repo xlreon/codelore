@@ -523,7 +523,9 @@ function toTwoLines(tip) {
     return m;
   });
 
-  let line1 = clip(rawTitle || rawBody, 100);
+  // Allow enough text for two full terminal rows; display wraps to width.
+  const MAX = 220;
+  let line1 = clip(rawTitle || rawBody, MAX);
   let line2 = "";
 
   if (rawBody && rawTitle) {
@@ -541,9 +543,9 @@ function toTwoLines(tip) {
     }
     // Also drop if detail is title with minor prefix
     if (detail && fuzzySame(detail, line1)) detail = "";
-    if (detail) line2 = clip(detail, 120);
+    if (detail) line2 = clip(detail, MAX);
   } else if (!rawTitle && rawBody) {
-    const parts = splitTwo(rawBody, 100, 120);
+    const parts = splitTwo(rawBody, Math.floor(MAX / 2), MAX);
     line1 = parts[0];
     line2 = parts[1] || "";
   }
@@ -552,7 +554,7 @@ function toTwoLines(tip) {
   if (line2 && fuzzySame(line1, line2)) line2 = "";
   if (line2 && line2.toLowerCase().includes(line1.toLowerCase().slice(0, 50))) {
     // line2 is superset — use only line2 as single line (more complete)
-    line1 = clip(line2, 100);
+    line1 = clip(line2, MAX);
     line2 = "";
   }
 
@@ -895,15 +897,150 @@ function color(code, plain, s) {
   return `\x1b[${code}m${s}\x1b[0m`;
 }
 
+/** Visible width of a string (strips ANSI for length). */
+function visibleLen(s) {
+  return String(s).replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+function padVisible(s, width) {
+  const n = visibleLen(s);
+  if (n >= width) return s;
+  return s + " ".repeat(width - n);
+}
+
+function termWidth() {
+  const fromEnv = Number(process.env.COLUMNS) || 0;
+  const fromStdout = process.stdout.columns || 0;
+  let w = fromStdout || fromEnv;
+  if (!w) {
+    try {
+      w = Number(
+        execFileSync("tput", ["cols"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(),
+      );
+    } catch {
+      w = 80;
+    }
+  }
+  // Use almost full width; clamp so it doesn't explode on huge windows
+  return Math.max(60, Math.min(w || 80, 160));
+}
+
+/** Word-wrap to at most maxLines lines of width `inner`. */
+function wrapLines(text, inner, maxLines = 2) {
+  const words = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+  if (!words.length) return [""];
+  const lines = [];
+  let cur = "";
+  for (const word of words) {
+    const next = cur ? `${cur} ${word}` : word;
+    if (next.length <= inner) {
+      cur = next;
+      continue;
+    }
+    if (cur) lines.push(cur);
+    // hard-break overlong words
+    if (word.length > inner) {
+      let rest = word;
+      while (rest.length > inner && lines.length < maxLines) {
+        lines.push(rest.slice(0, inner - 1) + "…");
+        rest = rest.slice(inner - 1);
+      }
+      cur = rest;
+    } else {
+      cur = word;
+    }
+    if (lines.length >= maxLines) {
+      cur = "";
+      break;
+    }
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  // If we overflowed, mark last line
+  if (lines.length > maxLines) return lines.slice(0, maxLines);
+  return lines.length ? lines : [""];
+}
+
+/**
+ * Full-width terminal banner.
+ * Tip content stays ≤2 lines; the *frame* uses the whole terminal width.
+ */
 function deliverTerminal(tip, ws, plain) {
+  const width = termWidth();
+  const inner = width - 4; // "│ " + content + " │"
   const tier = String(tip.tier || "tip").toUpperCase();
   const where = ws.packageHint ? `${ws.name}/${ws.packageHint}` : ws.name;
-  const tag = color(tip.tier === "critical" ? "31;1" : "33", plain, `[${tier}]`);
-  const head = color("36", plain, `CodeLore · ${where}`) + " " + tag;
-  // Strictly 1–2 content lines
-  console.log(head);
-  console.log(tip.line1);
-  if (tip.line2) console.log(tip.line2);
+  const source = tip.source || "auto";
+  const isCritical = tip.tier === "critical";
+
+  // Colors
+  const border = isCritical ? "31" : "36"; // red / cyan
+  const accent = isCritical ? "31;1" : "33;1";
+  const dim = "2";
+  const bold = "1";
+  const invert = isCritical ? "41;97;1" : "46;30;1"; // red/cyan bar for tip text
+
+  const top = "╔" + "═".repeat(width - 2) + "╗";
+  const mid = "╠" + "═".repeat(width - 2) + "╣";
+  const bot = "╚" + "═".repeat(width - 2) + "╝";
+  const row = (content, style = null) => {
+    // Do NOT collapse spaces (clip would squash full-width padding)
+    let text = String(content);
+    if (visibleLen(text) > inner) {
+      text = text.slice(0, inner - 1) + "…";
+    }
+    const body = padVisible(text, inner);
+    const left = color(border, plain, "║ ");
+    const right = color(border, plain, " ║");
+    const midC = style ? color(style, plain, body) : body;
+    return left + midC + right;
+  };
+
+  // Combine line1+line2 into up to 2 wrapped display lines (full width)
+  const blob = [tip.line1, tip.line2].filter(Boolean).join(" ");
+  const tipLines = wrapLines(blob, inner, 2);
+
+  const headerL = `CodeLore  ·  ${where}`;
+  const headerR = `[${tier}]`;
+  const gap = Math.max(1, inner - headerL.length - headerR.length);
+  const headerLine = headerL + " ".repeat(gap) + headerR;
+
+  const out = [];
+  out.push("");
+  out.push(color(border, plain, top));
+  out.push(row(headerLine, bold));
+  out.push(
+    row(
+      `source: ${source}${ws.autoPicked ? "  ·  auto-picked repo" : ""}`,
+      dim,
+    ),
+  );
+  out.push(color(border, plain, mid));
+
+  // Full-width highlighted tip body (the part you actually read)
+  for (const line of tipLines) {
+    const body = padVisible(line, inner);
+    if (plain) {
+      // NO_COLOR / --plain: full-width frame still present; prefix for scanability
+      out.push("║ » " + padVisible(line, inner - 2) + "║");
+    } else {
+      out.push(
+        color(border, plain, "║ ") +
+          color(invert, plain, body) +
+          color(border, plain, " ║"),
+      );
+    }
+  }
+
+  out.push(color(border, plain, mid));
+  out.push(row(`id: ${tip.id}    log: ~/.tips/tips-log.md`, dim));
+  out.push(color(border, plain, bot));
+  out.push("");
+
+  console.log(out.join("\n"));
 }
 
 /** Resolve terminal-notifier binary (Homebrew paths first). */
