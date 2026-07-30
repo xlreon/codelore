@@ -1,33 +1,67 @@
-# CodeLore POC
+# CodeLore POC v3
 
-Minimal proof that the core loop works — **not** the full MVP.
+## Rules
 
-## What it proves
+1. **Tips are 1–2 lines max** (never longer).
+2. **Every tip shown** is appended to `~/.tips/tips-log.md`.
+3. **Multi-repo parents mandate selection** — pick all or specific directories before tips run.
 
-1. Detect git repo from cwd  
-2. Load tip pack from `.codelore/tips/*.json`  
-3. Rank one tip (tier + unseen + path + diversity)  
-4. Deliver to terminal and/or macOS Notification Center (`osascript`)  
-5. Persist seen-state under `~/.codelore/state/`  
-6. 30-minute cooldown (bypass with `--force`)  
-7. Quiet-fail when `--reason session-start`
-
-## Run
+## Setup (once)
 
 ```bash
-# from codelore repo
-node poc/codelore.mjs tip --force
+POC=~/code/codelore/poc/codelore.mjs
 
-# terminal + Mac notification
-node poc/codelore.mjs tip --channel both --force
+# Interactive: choose directories under ~/code
+node $POC select --cwd ~/code
 
-# machine-readable
-node poc/codelore.mjs tip --channel json --force
+# Or watch everything discovered under ~/code
+node $POC select --cwd ~/code --all
 
-# from another repo that has .codelore/tips/
-cd ~/code/acme && node ~/code/codelore/poc/codelore.mjs tip --force
+# See what's watched
+node $POC watched
 ```
 
-## Intentionally missing (post-council full build)
+Config: `~/.tips/config.json`  
+Log: `~/.tips/tips-log.md`
 
-YAML packs, harvest/approve, AGENTS.md extraction, full CLI surface, Zod schema, Claude Code hook installer, spaced multi-interval critical re-surface, secret lint, vitest suite.
+## Daily / SessionStart
+
+```bash
+node $POC tip --cwd "$PWD" --force
+node $POC tip --cwd "$PWD" --channel both --reason session-start
+node $POC log          # tail the tip history
+node $POC list --cwd ~/code   # * = watched
+```
+
+### Claude Code hook
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node /Users/sidharthsatapathy/code/codelore/poc/codelore.mjs tip --reason session-start --channel both --cwd \"$PWD\""
+      }]
+    }]
+  }
+}
+```
+
+Run `select` once first. Hooks are non-interactive; if selection is missing they exit quietly with a stderr hint.
+
+## Tip shape
+
+```
+CodeLore · frontend [CRITICAL]
+NEVER rename symbols with find-and-replace — use gitnexus_rename…
+(optional second line of detail)
+```
+
+## Files
+
+| Path | Purpose |
+|------|---------|
+| `~/.tips/config.json` | `watchMode`: `all` \| `selected`, `watched[]` paths |
+| `~/.tips/tips-log.md` | Append-only log of every tip shown |
+| `~/.codelore/state/` | Per-repo seen/cooldown (not the log) |

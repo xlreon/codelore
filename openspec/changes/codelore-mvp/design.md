@@ -153,16 +153,20 @@ type TipPayload = {
 
 **Optional agent-context mode:** `codelore tip --format json --for-agent` prints a one-liner the session can include without replacing human delivery.
 
-### D7 — Tip sources pipeline
+### D7 — Tip sources pipeline (auto-first; seed optional)
 
-| Priority | Source | MVP? |
-|----------|--------|------|
-| 1 | `.codelore/tips/**/*.yaml` curated | Yes |
-| 2 | Distilled bullets from `AGENTS.md` / `CLAUDE.md` (heuristic section extract: "Gotchas", "Critical", "Never") | Yes (read-only extract → ephemeral tips, not written unless approved) |
-| 3 | Git recent merges: subject + files → changelog-tier candidates | Yes (ephemeral) |
-| 4 | AI harvest (`codelore harvest`) proposing new YAML entries | Post-MVP-core; scaffold CLI stub that writes `candidates/` for human `codelore approve` |
+| Priority | Source | Status |
+|----------|--------|--------|
+| 1 | **Auto-docs** — AGENTS.md / CLAUDE.md / README gotcha-like sections + package-level CLAUDE.md | POC proven |
+| 2 | **Auto-git** — recent commits + high-churn paths | POC proven |
+| 3 | **Auto-stack / structure** — package.json, pyproject, monorepo package map | POC proven |
+| 4 | Curated `.codelore/tips/**` | Optional boost only; **not required** |
+| 5 | AI harvest → candidates → human approve | Later |
 
-Ephemeral tips (2–3) never auto-commit; they only compete in ranking for the current session.
+**Workspace resolution (session open):**
+- `cwd` in git → that repo (+ monorepo `packageHint`)
+- parent of many repos → frecency auto-pick (demote worktrees/archives)
+- See `delta-auto-intelligence.md`
 
 ### D8 — Seen-state location
 
