@@ -86,7 +86,8 @@ function saveConfig(cfg) {
 function parseArgs(argv) {
   const out = {
     cmd: "tip",
-    channel: "terminal",
+    // Default both on macOS so session tips actually notify
+    channel: process.platform === "darwin" ? "both" : "terminal",
     force: false,
     reason: "manual",
     cwd: process.cwd(),
@@ -98,7 +99,11 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (["tip", "list", "detect", "select", "log", "watched"].includes(a)) {
+    if (
+      ["tip", "list", "detect", "select", "log", "watched", "notify-test"].includes(
+        a,
+      )
+    ) {
       out.cmd = a;
       continue;
     }
@@ -901,28 +906,123 @@ function deliverTerminal(tip, ws, plain) {
   if (tip.line2) console.log(tip.line2);
 }
 
+/** Resolve terminal-notifier binary (Homebrew paths first). */
+function findTerminalNotifier() {
+  const candidates = [
+    process.env.TERMINAL_NOTIFIER,
+    "/opt/homebrew/bin/terminal-notifier",
+    "/usr/local/bin/terminal-notifier",
+    "terminal-notifier",
+  ].filter(Boolean);
+  for (const bin of candidates) {
+    try {
+      if (bin.includes("/")) {
+        if (existsSync(bin)) return bin;
+      } else {
+        execFileSync("which", [bin], { stdio: "ignore" });
+        return bin;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/**
+ * Deliver macOS Notification Center banner.
+ * Prefer terminal-notifier (real .app, can request permission).
+ * osascript often exits 0 but shows nothing on modern macOS without Terminal NC access.
+ * Returns { ok, backend, error? }
+ */
 function deliverMacos(tip, ws) {
   const title = `CodeLore · ${ws.name}`.slice(0, 60);
-  // Notification: title + one message line (OS limit); put line1 as message
-  const message = tip.line1.slice(0, 120);
-  const subtitle = tip.line2 ? tip.line2.slice(0, 80) : String(tip.tier || "");
-  try {
-    execFileSync(
-      "terminal-notifier",
-      ["-title", title, "-subtitle", subtitle, "-message", message],
-      { stdio: "ignore" },
-    );
-    return true;
-  } catch {
-    /* fallthrough */
+  const message = (tip.line1 || "tip").slice(0, 120);
+  const subtitle = (tip.line2 || String(tip.tier || "tip")).slice(0, 80);
+
+  const tn = findTerminalNotifier();
+  if (tn) {
+    try {
+      execFileSync(
+        tn,
+        [
+          "-title",
+          title,
+          "-subtitle",
+          subtitle,
+          "-message",
+          message,
+          "-sound",
+          "default",
+          "-group",
+          "codelore",
+          "-sender",
+          "com.apple.Terminal",
+        ],
+        { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 },
+      );
+      return { ok: true, backend: "terminal-notifier" };
+    } catch (e) {
+      // try without -sender
+      try {
+        execFileSync(
+          tn,
+          [
+            "-title",
+            title,
+            "-subtitle",
+            subtitle,
+            "-message",
+            message,
+            "-sound",
+            "default",
+            "-group",
+            "codelore",
+          ],
+          { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 },
+        );
+        return { ok: true, backend: "terminal-notifier" };
+      } catch (e2) {
+        /* fall through to osascript */
+      }
+    }
   }
+
   try {
-    const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(subtitle)}`;
-    execFileSync("osascript", ["-e", script], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
+    const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(subtitle)} sound name "default"`;
+    execFileSync("osascript", ["-e", script], {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5000,
+    });
+    // osascript "succeeds" even when NC blocks the banner — warn user
+    return {
+      ok: true,
+      backend: "osascript",
+      weak: true,
+      hint: "If you see no banner: System Settings → Notifications → allow terminal-notifier (brew install terminal-notifier)",
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      backend: null,
+      error: e.message || String(e),
+      hint: "Install: brew install terminal-notifier  then allow Notifications for it",
+    };
   }
+}
+
+function reportNotifyResult(result, quiet) {
+  if (result.ok && !result.weak) {
+    if (!quiet) console.error(`[codelore] notification sent via ${result.backend}`);
+    return;
+  }
+  if (result.ok && result.weak) {
+    console.error(`[codelore] notification attempted via ${result.backend} (often invisible)`);
+    if (result.hint) console.error(`[codelore] ${result.hint}`);
+    return;
+  }
+  console.error(`[codelore] notification FAILED: ${result.error || "unknown"}`);
+  if (result.hint) console.error(`[codelore] ${result.hint}`);
 }
 
 function deliverJson(tip, ws) {
@@ -1002,6 +1102,24 @@ async function main() {
   try {
     if (args.help || process.argv.slice(2).length === 0) {
       usage();
+      process.exit(0);
+    }
+
+    if (args.cmd === "notify-test") {
+      const fake = toTwoLines({
+        id: "notify-test",
+        title: "CodeLore notification test",
+        body: "If you see this banner, macOS tips will work.",
+        tier: "gotcha",
+        source: "test",
+      });
+      const result = deliverMacos(fake, { name: "test" });
+      reportNotifyResult(result, false);
+      if (!result.ok) process.exit(1);
+      console.log("[codelore] look for a banner/sound now (top-right).");
+      console.log(
+        "[codelore] if nothing: System Settings → Notifications → terminal-notifier → Allow Notifications",
+      );
       process.exit(0);
     }
 
@@ -1157,8 +1275,11 @@ async function main() {
       if (ch === "terminal" || ch === "both")
         deliverTerminal(shaped, ws, args.plain);
       if (ch === "macos" || ch === "both") {
-        const ok = deliverMacos(shaped, ws);
-        if (!ok && ch === "macos") deliverTerminal(shaped, ws, args.plain);
+        const result = deliverMacos(shaped, ws);
+        reportNotifyResult(result, quietFail);
+        if (!result.ok && ch === "macos") {
+          deliverTerminal(shaped, ws, args.plain);
+        }
       }
     }
 
