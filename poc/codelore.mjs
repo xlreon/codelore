@@ -9,7 +9,7 @@
  *
  * Zero npm deps. Node 20+.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -88,6 +88,8 @@ function parseArgs(argv) {
     cmd: "tip",
     // Default both on macOS so session tips actually notify
     channel: process.platform === "darwin" ? "both" : "terminal",
+    // dialog = large center alert (default); banner = tiny top-right NC toast
+    notifyStyle: "dialog",
     force: false,
     reason: "manual",
     cwd: process.cwd(),
@@ -113,6 +115,7 @@ function parseArgs(argv) {
     else if (a === "--clear") out.selectNone = true;
     else if (a === "--yes" || a === "-y") out.nonInteractive = true;
     else if (a === "--channel" && argv[i + 1]) out.channel = argv[++i];
+    else if (a === "--notify" && argv[i + 1]) out.notifyStyle = argv[++i]; // dialog|banner|both
     else if (a === "--reason" && argv[i + 1]) out.reason = argv[++i];
     else if (a === "--cwd" && argv[i + 1]) out.cwd = resolve(argv[++i]);
     else if (a === "--repo" && argv[i + 1]) out.pick = resolve(argv[++i]);
@@ -1067,12 +1070,78 @@ function findTerminalNotifier() {
 }
 
 /**
- * Deliver macOS Notification Center banner.
- * Prefer terminal-notifier (real .app, can request permission).
- * osascript often exits 0 but shows nothing on modern macOS without Terminal NC access.
- * Returns { ok, backend, error? }
+ * macOS delivery.
+ *
+ * Apple Notification Center banners (top-right) are intentionally tiny — we cannot
+ * make them full-width. Default is a large center **dialog/alert** instead.
+ *
+ * Styles:
+ *   dialog  — big center alert (default), auto-dismiss after ~8s, non-blocking
+ *   banner  — small top-right NC toast via terminal-notifier
+ *   both    — dialog + banner
  */
-function deliverMacos(tip, ws) {
+function deliverMacos(tip, ws, style = "dialog") {
+  const styles =
+    style === "both" ? ["dialog", "banner"] : [style || "dialog"];
+  const results = [];
+  for (const s of styles) {
+    if (s === "banner") results.push(deliverMacosBanner(tip, ws));
+    else results.push(deliverMacosDialog(tip, ws));
+  }
+  const ok = results.some((r) => r.ok);
+  const backends = results.map((r) => r.backend).filter(Boolean).join("+");
+  const failed = results.find((r) => !r.ok);
+  return {
+    ok,
+    backend: backends || null,
+    weak: results.every((r) => r.weak || !r.ok) && ok,
+    error: ok ? undefined : failed?.error,
+    hint: failed?.hint,
+  };
+}
+
+/** Large center alert — actually readable. Non-blocking so SessionStart isn't stuck. */
+function deliverMacosDialog(tip, ws) {
+  const title = `CodeLore · ${ws.name} · ${String(tip.tier || "tip").toUpperCase()}`;
+  const body = [tip.line1, tip.line2].filter(Boolean).join("\n\n") || "tip";
+  // display alert is larger/more prominent than display notification
+  const script = `
+set theTitle to ${JSON.stringify(title)}
+set theBody to ${JSON.stringify(body)}
+try
+  display alert theTitle message theBody as informational buttons {"Got it"} default button "Got it" giving up after 10
+on error
+  display dialog theBody with title theTitle buttons {"Got it"} default button "Got it" giving up after 10 with icon note
+end try
+`;
+  try {
+    const child = spawn("osascript", ["-e", script], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    return { ok: true, backend: "dialog" };
+  } catch (e) {
+    try {
+      // fallback sync (blocks up to ~10s)
+      execFileSync("osascript", ["-e", script], {
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 12000,
+      });
+      return { ok: true, backend: "dialog-sync" };
+    } catch (e2) {
+      return {
+        ok: false,
+        backend: null,
+        error: e2.message || String(e2),
+        hint: "macOS blocked the dialog — allow Automation for your terminal app if prompted",
+      };
+    }
+  }
+}
+
+/** Tiny top-right Notification Center toast (Apple-limited size). */
+function deliverMacosBanner(tip, ws) {
   const title = `CodeLore · ${ws.name}`.slice(0, 60);
   const message = (tip.line1 || "tip").slice(0, 120);
   const subtitle = (tip.line2 || String(tip.tier || "tip")).slice(0, 80);
@@ -1093,68 +1162,41 @@ function deliverMacos(tip, ws) {
           "default",
           "-group",
           "codelore",
-          "-sender",
-          "com.apple.Terminal",
         ],
         { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 },
       );
-      return { ok: true, backend: "terminal-notifier" };
-    } catch (e) {
-      // try without -sender
-      try {
-        execFileSync(
-          tn,
-          [
-            "-title",
-            title,
-            "-subtitle",
-            subtitle,
-            "-message",
-            message,
-            "-sound",
-            "default",
-            "-group",
-            "codelore",
-          ],
-          { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 },
-        );
-        return { ok: true, backend: "terminal-notifier" };
-      } catch (e2) {
-        /* fall through to osascript */
-      }
+      return { ok: true, backend: "banner", weak: true };
+    } catch {
+      /* fallthrough */
     }
   }
-
   try {
     const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} subtitle ${JSON.stringify(subtitle)} sound name "default"`;
     execFileSync("osascript", ["-e", script], {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 5000,
     });
-    // osascript "succeeds" even when NC blocks the banner — warn user
     return {
       ok: true,
-      backend: "osascript",
+      backend: "banner-osascript",
       weak: true,
-      hint: "If you see no banner: System Settings → Notifications → allow terminal-notifier (brew install terminal-notifier)",
+      hint: "Banners are always small (Apple). Use --notify dialog for a large center alert.",
     };
   } catch (e) {
-    return {
-      ok: false,
-      backend: null,
-      error: e.message || String(e),
-      hint: "Install: brew install terminal-notifier  then allow Notifications for it",
-    };
+    return { ok: false, backend: null, error: e.message || String(e) };
   }
 }
 
 function reportNotifyResult(result, quiet) {
   if (result.ok && !result.weak) {
-    if (!quiet) console.error(`[codelore] notification sent via ${result.backend}`);
+    if (!quiet)
+      console.error(`[codelore] notification sent via ${result.backend} (large dialog)`);
     return;
   }
   if (result.ok && result.weak) {
-    console.error(`[codelore] notification attempted via ${result.backend} (often invisible)`);
+    console.error(
+      `[codelore] small banner via ${result.backend} — use --notify dialog for a big center alert`,
+    );
     if (result.hint) console.error(`[codelore] ${result.hint}`);
     return;
   }
@@ -1245,17 +1287,20 @@ async function main() {
     if (args.cmd === "notify-test") {
       const fake = toTwoLines({
         id: "notify-test",
-        title: "CodeLore notification test",
-        body: "If you see this banner, macOS tips will work.",
+        title: "CodeLore large dialog test",
+        body: "This should be a big center alert — not a tiny top-right toast. Auto-closes in ~10s.",
         tier: "gotcha",
         source: "test",
       });
-      const result = deliverMacos(fake, { name: "test" });
+      const style = args.notifyStyle || "dialog";
+      const result = deliverMacos(fake, { name: "test" }, style);
       reportNotifyResult(result, false);
       if (!result.ok) process.exit(1);
-      console.log("[codelore] look for a banner/sound now (top-right).");
       console.log(
-        "[codelore] if nothing: System Settings → Notifications → terminal-notifier → Allow Notifications",
+        `[codelore] look for a LARGE center dialog (style=${style}). Not the tiny top-right banner.`,
+      );
+      console.log(
+        "[codelore] tiny banner only if you pass --notify banner",
       );
       process.exit(0);
     }
@@ -1412,7 +1457,7 @@ async function main() {
       if (ch === "terminal" || ch === "both")
         deliverTerminal(shaped, ws, args.plain);
       if (ch === "macos" || ch === "both") {
-        const result = deliverMacos(shaped, ws);
+        const result = deliverMacos(shaped, ws, args.notifyStyle || "dialog");
         reportNotifyResult(result, quietFail);
         if (!result.ok && ch === "macos") {
           deliverTerminal(shaped, ws, args.plain);
