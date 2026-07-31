@@ -596,7 +596,12 @@ function clip(s, n) {
 function stripMd(s) {
   return s
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/[`*_>#]/g, "")
+    // Keep underscores (client_id, require_ai_credits) — only strip md chrome
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/^#+\s*/gm, "")
+    .replace(/>/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -912,16 +917,44 @@ function scoreTip(tip, ctx) {
   else {
     const last = Date.parse(ctx.state.seen[tip.id].lastAt || 0);
     const days = (Date.now() - last) / 86400000;
-    if (tip.tier === "critical" && days > 1) score += 20;
-    else score -= 55;
+    const views = ctx.state.seen[tip.id].count || 1;
+    // Prefer least-recently / least-often shown among seen tips (avoid 2-tip flip-flop)
+    score -= 25 + Math.min(views, 8) * 3;
+    if (tip.tier === "critical" && days > 1) score += 18;
+    // Hard avoid repeating the immediately previous tip
+    if (ctx.state.lastShownId && tip.id === ctx.state.lastShownId) score -= 80;
   }
   const paths = tip.paths || [];
+  const tags = tip.tags || [];
+  const pkg = ctx.packageHint || ctx.repoName || "";
+  if (pkg) {
+    const pathHit = paths.some((p) => String(p).includes(pkg));
+    const tagHit =
+      (pkg.includes("backend") && tags.includes("backend")) ||
+      (pkg.includes("ui") && (tags.includes("frontend") || tags.includes("ui"))) ||
+      (pkg.includes("mobile") && tags.includes("mobile"));
+    if (pathHit || tagHit) score += 40;
+    // Strong demotion when tip is clearly for another package
+    const otherPkg =
+      (!pkg.includes("backend") &&
+        paths.some((p) => String(p).includes("backend")) &&
+        !paths.some((p) => String(p).includes(pkg))) ||
+      (!pkg.includes("ui") &&
+        paths.some((p) => String(p).includes("frontend")) &&
+        !pathHit) ||
+      (!pkg.includes("mobile") &&
+        paths.some((p) => String(p).includes("mobile")) &&
+        !pathHit);
+    if (otherPkg && paths.length) score -= 45;
+    // Tag-only mismatch (UI tip while in backend)
+    if (pkg.includes("backend") && tags.includes("frontend") && !tags.includes("backend"))
+      score -= 35;
+    if (pkg.includes("ui") && tags.includes("backend") && !tags.includes("frontend"))
+      score -= 35;
+  }
   if (ctx.packageHint && paths.some((p) => String(p).includes(ctx.packageHint)))
-    score += 25;
-  // Nested package repo (e.g. frontend as own git root): match tip paths to package name
-  if (ctx.repoName && paths.some((p) => String(p).includes(ctx.repoName)))
-    score += 22;
-  const tag = (tip.tags || [])[0];
+    score += 10;
+  const tag = tags[0];
   if (tag && (ctx.state.lastTags || []).includes(tag)) score -= 12;
   score += (parseInt(hash(tip.id).slice(0, 6), 16) % 7) / 10;
   return score;
