@@ -25,7 +25,7 @@ CodeLore is an **attention product**, not a storage product. Specs over-invested
 
 ## Success gate (unlock full MVP)
 
-- Dogfood on daily repos (or daily repos) with **hand-written tips only**.
+- Dogfood on daily repos with **hand-written tips only** (packs stay local).
 - **≥3 of last 5** Claude/Grok sessions surface a tip that is **not immediately muted / hook removed**.
 - At least **one** self-reported “that tip prevented a known mistake.”
 - Fail either → rewrite tips or kill cadence; do **not** expand features.

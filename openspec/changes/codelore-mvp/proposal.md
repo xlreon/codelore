@@ -40,5 +40,5 @@ AI-assisted developers (Claude Code, Grok, Cursor agents) push large volumes of 
 - **Consumer integration:** Claude Code `~/.claude/settings.json` hooks; optional global shell function; per-repo `.codelore/` committed for teams.
 - **Dependencies:** git, optional `terminal-notifier` (macOS), Node 20+ (or single static binary if Go).
 - **Privacy:** local-first; no tip content leaves the machine unless user opts into remote tip packs later (out of MVP).
-- **Dogfood use case:** first tip pack in a private consumer monorepo (backend/ui/mobile conventions, privacy gotchas, track system) to dogfood the knowledge-multiplier loop.
+- **Dogfood use case:** first tip pack lives only in a private consumer monorepo (not this package) to prove the knowledge-multiplier loop.
 - **Out of scope for MVP:** full IDE extension, Slack/Discord push, multi-tenant SaaS, auto-publishing unreviewed AI tips, Windows toast (macOS + terminal first).

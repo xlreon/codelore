@@ -51,8 +51,8 @@
 
 - [ ] 7.1 Document Claude Code `settings.json` hook; optional project-level `.claude/settings.json` example in repo
 - [ ] 7.2 Wire Sid's global Claude Code hook (with confirmation) pointing at installed `codelore`
-- [ ] 7.3 Seed first real pack: consumer `.codelore/tips/` with ≥15 high-value tips (security/privacy, monorepo layout, AI agent gotchas, migration norms)
-- [ ] 7.4 Smoke-test: `cd my-app && codelore tip --force --channel both` shows tip + notification
+- [ ] 7.3 Seed first real pack locally (consumer repo only): ≥15 high-value tips — never commit packs into this package
+- [ ] 7.4 Smoke-test: `codelore tip --force --channel both` in a dogfood repo shows tip + toast
 - [ ] 7.5 Add optional zsh `chpwd` snippet (throttled) to docs for non-Claude terminal use
 
 ## 8. Quality bar

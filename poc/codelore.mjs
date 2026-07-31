@@ -230,7 +230,7 @@ function discoverRepos(parent, depth = SCAN_DEPTH) {
     const path = r.root;
     if (/archive|backup|old|leaked|tmp|claude-code-leaked/i.test(r.name + path))
       boost *= 0.25;
-    if (/worktree|worktrees|-val(?:\/|$)|-pr\d|\/copy|clone/i.test(path))
+    if (/worktree|-wt\b|-val(?:\/|$)|-pr\d|\/copy|clone/i.test(path))
       boost *= 0.45;
     if (
       existsSync(join(r.root, "AGENTS.md")) ||
@@ -934,17 +934,14 @@ function scoreTip(tip, ctx) {
       (pkg.includes("ui") && (tags.includes("frontend") || tags.includes("ui"))) ||
       (pkg.includes("mobile") && tags.includes("mobile"));
     if (pathHit || tagHit) score += 40;
-    // Strong demotion when tip is clearly for another package
+    // Strong demotion when tip paths target a sibling package
+    const pathStr = paths.map(String).join(" ");
     const otherPkg =
-      (!pkg.includes("backend") &&
-        paths.some((p) => String(p).includes("backend")) &&
-        !paths.some((p) => String(p).includes(pkg))) ||
-      (!pkg.includes("ui") &&
-        paths.some((p) => String(p).includes("frontend")) &&
+      (!/backend/.test(pkg) && /backend/.test(pathStr) && !pathHit) ||
+      (!/(^|[-_/])ui($|[-_/])|frontend/.test(pkg) &&
+        /(^|[-_/])ui($|[-_/])|frontend/.test(pathStr) &&
         !pathHit) ||
-      (!pkg.includes("mobile") &&
-        paths.some((p) => String(p).includes("mobile")) &&
-        !pathHit);
+      (!/mobile/.test(pkg) && /mobile/.test(pathStr) && !pathHit);
     if (otherPkg && paths.length) score -= 45;
     // Tag-only mismatch (UI tip while in backend)
     if (pkg.includes("backend") && tags.includes("frontend") && !tags.includes("backend"))

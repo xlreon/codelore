@@ -53,9 +53,9 @@ Run `select` once first. Hooks are non-interactive; if selection is missing they
 ## Tip shape
 
 ```
-CodeLore · frontend [CRITICAL]
-NEVER rename symbols with find-and-replace — use gitnexus_rename…
-(optional second line of detail)
+CodeLore · my-app [CRITICAL]
+Never rename symbols with find-and-replace — use the graph-aware renamer
+(optional second line of detail — full text, no ellipsis)
 ```
 
 ## Files

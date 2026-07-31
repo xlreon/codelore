@@ -23,7 +23,7 @@ When the current working directory is a subdirectory of the repo root, the syste
 
 #### Scenario: Backend cwd boosts backend tips
 - **WHEN** the cwd is under `backend/` and tips exist with paths under `backend/` and under `frontend/`
-- **THEN** tips with matching backend paths receive a higher relevance score than unrelated UI-only tips
+- **THEN** tips with matching backend paths receive a higher relevance score than unrelated frontend-only tips
 
 ### Requirement: Recency boost from git
 The system SHALL boost tips whose related `paths` appear in recent commits (configurable window, default last 20 commits) so changelog-relevant lore surfaces after heavy AI-assisted merges.

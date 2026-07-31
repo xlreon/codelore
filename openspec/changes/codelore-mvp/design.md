@@ -15,7 +15,7 @@ AI coding agents (Claude Code, Grok Build, Cursor agents) make developers **prod
 
 **CodeLore's unique wedge:** ambient, ranked, multi-source *codebase lore* delivered into the **human** channel (terminal + macOS Notification Center) at **AI session boundaries**, with team-shared tip packs that survive chat amnesia.
 
-Primary stakeholder: local dogfooding on real monorepos; secondary: any AI-assisted team living in the terminal.
+Primary stakeholder: local dogfood on real monorepos; secondary: any AI-assisted team living in the terminal.
 
 ## Goals / Non-Goals
 
@@ -75,25 +75,23 @@ Primary stakeholder: local dogfooding on real monorepos; secondary: any AI-assis
 ### D3 — Tip storage format: YAML in `.codelore/tips/*.yaml`
 
 ```yaml
-# .codelore/tips/auth-gotchas.yaml
+# .codelore/tips/auth-gotchas.yaml  (lives in consumer repos only — not in this package)
 version: 1
 tips:
   - id: acme-pii-split
     title: "PII redaction is split across two modules"
     body: |
-      `core/pii_redactor.py` runs pre-LLM; ID-number patterns lived only in
-      `pii_sanitizer.py` (logs). Never assume one module covers all PII.
+      Pre-LLM redaction and log scrubbing are different modules.
+      Never assume one covers all identifier types.
     tier: critical
-    tags: [security, dpdpa, backend]
+    tags: [security, privacy, backend]
     paths: [backend/app/core/pii_redactor.py]
     source: human
     created: 2026-07-20
-    expires: null          # optional; changelog tips can expire
+    expires: null
     links:
       - type: file
         value: backend/app/core/pii_redactor.py
-      - type: pr
-        value: "https://github.com/..."
 ```
 
 - **Why YAML over JSON:** hand-editable, multi-line bodies, comments for authors.
@@ -206,7 +204,7 @@ No PII; no tip body stored in state.
 
 1. Scaffold package, ship `codelore tip` + YAML schema + seen-state.
 2. Install global CLI; wire Claude Code SessionStart for Sid.
-3. Dogfood: seed consumer `.codelore/tips/` with 15–30 high-value tips (security, architecture, AI agent gotchas).
+3. Dogfood: seed a local consumer monorepo `.codelore/tips/` with 15–30 high-value tips (security, architecture, agent gotchas).
 4. Add macOS channel once terminal loop feels good.
 5. Add harvest/approve loop once authoring pain is real.
 6. Rollback: remove hook entry; uninstall package; `.codelore/` stays as harmless docs.
@@ -215,6 +213,6 @@ No PII; no tip body stored in state.
 
 1. **Product name final:** CodeLore vs shorter `lore` CLI binary? (Lean: package `codelore`, binary `codelore`, short alias `lore`.)
 2. **Should session-start tip also inject into Claude context automatically?** Powerful but can pollute context; propose opt-in `--for-agent` only.
-3. **Monorepo path awareness:** when cwd is `acme/backend`, prefer tips tagged `backend` / paths under that tree — yes for v1 ranking.
+3. **Monorepo path awareness:** when cwd is under a package dir (e.g. `*/backend`), prefer tips tagged `backend` / paths under that tree — yes for v1 ranking.
 4. **Share tip packs across forks without git?** Out of MVP; later `codelore pack pull`.
 5. **Graphify / GitNexus integration** for ranking "important symbols"? Valuable later; keep MVP free of those deps.
