@@ -1242,7 +1242,7 @@ function reportNotifyResult(result, quiet) {
   if (result.ok && result.backend === "toast") {
     if (!quiet)
       console.error(
-        `[codelore] toast shown (bottom-right, × to dismiss, no focus steal)`,
+        `[codelore] toast shown (top-left, × to dismiss, no focus steal)`,
       );
     return;
   }
@@ -1355,7 +1355,7 @@ async function main() {
       reportNotifyResult(result, false);
       if (!result.ok) process.exit(1);
       console.log(
-        `[codelore] look bottom-right for a floating toast (style=${style}). × closes it.`,
+        `[codelore] look top-left for a floating toast (style=${style}). × closes it.`,
       );
       process.exit(0);
     }
