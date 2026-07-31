@@ -88,8 +88,9 @@ function parseArgs(argv) {
     cmd: "tip",
     // Default both on macOS so session tips actually notify
     channel: process.platform === "darwin" ? "both" : "terminal",
-    // dialog = large center alert (default); banner = tiny top-right NC toast
-    notifyStyle: "dialog",
+    // toast = non-activating floating panel with × (default)
+    // banner = tiny NC toast; dialog = blocking center alert (avoid)
+    notifyStyle: "toast",
     force: false,
     reason: "manual",
     cwd: process.cwd(),
@@ -1072,32 +1073,82 @@ function findTerminalNotifier() {
 /**
  * macOS delivery.
  *
- * Apple Notification Center banners (top-right) are intentionally tiny — we cannot
- * make them full-width. Default is a large center **dialog/alert** instead.
- *
  * Styles:
- *   dialog  — big center alert (default), auto-dismiss after ~8s, non-blocking
- *   banner  — small top-right NC toast via terminal-notifier
- *   both    — dialog + banner
+ *   toast   — floating non-activating panel + × close (DEFAULT). Never steals focus.
+ *   banner  — tiny Notification Center toast (Apple-capped size)
+ *   dialog  — center alert (can interrupt — not recommended)
  */
-function deliverMacos(tip, ws, style = "dialog") {
-  const styles =
-    style === "both" ? ["dialog", "banner"] : [style || "dialog"];
-  const results = [];
-  for (const s of styles) {
-    if (s === "banner") results.push(deliverMacosBanner(tip, ws));
-    else results.push(deliverMacosDialog(tip, ws));
+function deliverMacos(tip, ws, style = "toast") {
+  const s = style || "toast";
+  if (s === "banner") return deliverMacosBanner(tip, ws);
+  if (s === "dialog") return deliverMacosDialog(tip, ws);
+  // toast (default) with fallbacks
+  const toast = deliverMacosToast(tip, ws);
+  if (toast.ok) return toast;
+  const banner = deliverMacosBanner(tip, ws);
+  if (banner.ok) {
+    return {
+      ...banner,
+      hint:
+        (toast.hint || toast.error || "toast binary missing") +
+        " — fell back to small banner. Rebuild: swiftc -parse-as-library -O -o poc/bin/codelore-toast poc/macos/CodeloreToast.swift",
+    };
   }
-  const ok = results.some((r) => r.ok);
-  const backends = results.map((r) => r.backend).filter(Boolean).join("+");
-  const failed = results.find((r) => !r.ok);
-  return {
-    ok,
-    backend: backends || null,
-    weak: results.every((r) => r.weak || !r.ok) && ok,
-    error: ok ? undefined : failed?.error,
-    hint: failed?.hint,
-  };
+  return toast.ok ? toast : banner;
+}
+
+function findCodeloreToast() {
+  const candidates = [
+    process.env.CODELORE_TOAST,
+    join(__dirname, "bin", "codelore-toast"),
+    join(__dirname, "codelore-toast"),
+    "/Users/sidharthsatapathy/code/codelore/poc/bin/codelore-toast",
+  ].filter(Boolean);
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** Static floating toast with × — does not steal focus or block work. */
+function deliverMacosToast(tip, ws) {
+  const bin = findCodeloreToast();
+  if (!bin) {
+    return {
+      ok: false,
+      backend: null,
+      error: "codelore-toast binary not found",
+      hint: "Build: swiftc -parse-as-library -O -o poc/bin/codelore-toast poc/macos/CodeloreToast.swift",
+    };
+  }
+  const title = `CodeLore · ${ws.name} · ${String(tip.tier || "tip").toUpperCase()}`;
+  const message = tip.line1 || "tip";
+  const subtitle = tip.line2 || "";
+  try {
+    const child = spawn(
+      bin,
+      [
+        "--title",
+        title,
+        "--message",
+        message,
+        ...(subtitle ? ["--subtitle", subtitle] : []),
+        "--tier",
+        String(tip.tier || "tip"),
+        "--timeout",
+        "12",
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+    child.unref();
+    return { ok: true, backend: "toast" };
+  } catch (e) {
+    return {
+      ok: false,
+      backend: null,
+      error: e.message || String(e),
+    };
+  }
 }
 
 /** Large center alert — actually readable. Non-blocking so SessionStart isn't stuck. */
@@ -1188,14 +1239,21 @@ function deliverMacosBanner(tip, ws) {
 }
 
 function reportNotifyResult(result, quiet) {
+  if (result.ok && result.backend === "toast") {
+    if (!quiet)
+      console.error(
+        `[codelore] toast shown (bottom-right, × to dismiss, no focus steal)`,
+      );
+    return;
+  }
   if (result.ok && !result.weak) {
     if (!quiet)
-      console.error(`[codelore] notification sent via ${result.backend} (large dialog)`);
+      console.error(`[codelore] notification sent via ${result.backend}`);
     return;
   }
   if (result.ok && result.weak) {
     console.error(
-      `[codelore] small banner via ${result.backend} — use --notify dialog for a big center alert`,
+      `[codelore] small banner via ${result.backend} — prefer toast: rebuild poc/bin/codelore-toast`,
     );
     if (result.hint) console.error(`[codelore] ${result.hint}`);
     return;
@@ -1287,20 +1345,17 @@ async function main() {
     if (args.cmd === "notify-test") {
       const fake = toTwoLines({
         id: "notify-test",
-        title: "CodeLore large dialog test",
-        body: "This should be a big center alert — not a tiny top-right toast. Auto-closes in ~10s.",
+        title: "CodeLore toast test",
+        body: "Static toast — click × to dismiss. Does not steal focus or block your work.",
         tier: "gotcha",
         source: "test",
       });
-      const style = args.notifyStyle || "dialog";
+      const style = args.notifyStyle || "toast";
       const result = deliverMacos(fake, { name: "test" }, style);
       reportNotifyResult(result, false);
       if (!result.ok) process.exit(1);
       console.log(
-        `[codelore] look for a LARGE center dialog (style=${style}). Not the tiny top-right banner.`,
-      );
-      console.log(
-        "[codelore] tiny banner only if you pass --notify banner",
+        `[codelore] look bottom-right for a floating toast (style=${style}). × closes it.`,
       );
       process.exit(0);
     }
