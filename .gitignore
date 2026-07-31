@@ -4,5 +4,18 @@ dist/
 *.log
 .env
 .env.*
-.codelore/state/
 *.local
+
+# ── Private / local tip data (never ship with the package) ──
+# User watch list + shown-tip history live under ~/.tips (outside repo)
+# Per-repo packs live under consumer projects, not this package.
+.codelore/state/
+.codelore/tips/**
+!.codelore/tips/.gitkeep
+examples/**/tips/
+examples/**/*-tips/
+**/tips-log.md
+
+# Build artifacts that are machine-specific (optional: keep toast binary for macOS)
+# Uncomment next line if you rebuild toast per-arch only:
+# poc/bin/codelore-toast
