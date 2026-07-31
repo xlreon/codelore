@@ -2,12 +2,11 @@ import AppKit
 import Foundation
 
 /// Non-activating floating toast with ×. Does not steal focus.
-/// Council 2026-07-31: top-right, ~360px, quiet hierarchy, edge-only tier,
-/// progress hairline, hover-pause, click-to-dismiss.
+/// A11y: WCAG-ish contrast (light text on near-opaque dark), tier as text (not color-only),
+/// VoiceOver labels on card + dismiss control.
 
 final class ToastController: NSObject {
   private var window: NSPanel!
-  private var timeoutWork: DispatchWorkItem?
   private var progressTimer: Timer?
   private var progressLayer: CALayer!
   private var timeout: TimeInterval = 12
@@ -15,34 +14,40 @@ final class ToastController: NSObject {
   private var paused = false
   private var lastTick: Date?
   private var width: CGFloat = 360
-  private var accent = NSColor(calibratedRed: 0.30, green: 0.78, blue: 0.90, alpha: 1)
+  private var accent = NSColor.systemTeal
 
   func show(title: String, message: String, subtitle: String?, timeout: TimeInterval, tier: String) {
     self.timeout = timeout
     self.remaining = timeout
 
-    // Council: shrink card — peripheral tip, not a panel
     let width: CGFloat = 360
     self.width = width
     let padding: CGFloat = 16
     let hasSub = !(subtitle ?? "").isEmpty
+    let tierKey = tier.lowercased()
+    let tierWord = Self.tierDisplayName(tierKey)
+
+    // High-contrast palette (fixed dark surface — readable regardless of system light/dark)
+    // Body ≈ white on ~#121212 → contrast ≫ 7:1
+    let bgColor = NSColor(srgbRed: 0.07, green: 0.07, blue: 0.08, alpha: 0.98)
+    let bodyColor = NSColor.white
+    let titleColor = NSColor(srgbRed: 0.95, green: 0.95, blue: 0.96, alpha: 1) // ~#F2F2F5
+    let subColor = NSColor(srgbRed: 0.82, green: 0.82, blue: 0.84, alpha: 1) // ~#D1D1D6, ≥4.5:1 on bg
+    let borderColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.22)
+
+    // Tier accent — used for edge/badge, but label always has text
+    let (accentColor, badgeFg, badgeBg) = Self.tierColors(tierKey)
+    accent = accentColor
 
     let msgFont = NSFont.systemFont(ofSize: 15, weight: .medium)
-    let msgWidth = width - padding * 2 - 36
+    let msgWidth = width - padding * 2 - 40
     let msgHeight = measureHeight(message, font: msgFont, width: msgWidth, maxLines: 2)
-    let titleH: CGFloat = 18
+    let titleH: CGFloat = 20
     let subH: CGFloat = hasSub ? 18 : 0
     let gap: CGFloat = 6
     let progressH: CGFloat = 3
     let height = padding + titleH + gap + msgHeight + (hasSub ? gap + subH : 0) + padding + progressH
-    let clampedHeight = max(90, min(height, 140))
-
-    accent =
-      tier.lowercased() == "critical"
-      ? NSColor(calibratedRed: 0.90, green: 0.30, blue: 0.32, alpha: 1)
-      : tier.lowercased() == "gotcha"
-        ? NSColor(calibratedRed: 0.92, green: 0.60, blue: 0.18, alpha: 1)
-        : NSColor(calibratedRed: 0.30, green: 0.78, blue: 0.90, alpha: 1)
+    let clampedHeight = max(96, min(height, 148))
 
     let panel = NSPanel(
       contentRect: NSRect(x: 0, y: 0, width: width, height: clampedHeight),
@@ -61,66 +66,93 @@ final class ToastController: NSObject {
     panel.isMovableByWindowBackground = true
     panel.worksWhenModal = true
     panel.alphaValue = 0
+    // VoiceOver: announce as a notification-like status
+    panel.setAccessibilityRole(.dialog)
+    panel.setAccessibilityLabel("CodeLore tip")
+    panel.setAccessibilityRoleDescription("tip notification")
 
     let root = ClickView(frame: NSRect(x: 0, y: 0, width: width, height: clampedHeight))
     root.wantsLayer = true
     root.onClick = { [weak self] in self?.closeClicked() }
+    root.setAccessibilityElement(true)
+    root.setAccessibilityRole(.group)
+    let a11yBits = [
+      "CodeLore tip",
+      tierWord,
+      title,
+      message,
+      subtitle ?? "",
+      "Press dismiss to close",
+    ].filter { !$0.isEmpty }
+    root.setAccessibilityLabel(a11yBits.joined(separator: ". "))
 
     let bg = CALayer()
     bg.frame = root.bounds
     bg.cornerRadius = 12
-    bg.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.90).cgColor
+    bg.backgroundColor = bgColor.cgColor
     bg.borderWidth = 1
-    bg.borderColor = accent.withAlphaComponent(0.4).cgColor
+    bg.borderColor = borderColor.cgColor
     bg.shadowColor = NSColor.black.cgColor
-    bg.shadowOpacity = 0.35
+    bg.shadowOpacity = 0.4
     bg.shadowRadius = 12
     bg.shadowOffset = CGSize(width: 0, height: -3)
     root.layer = bg
 
-    // Tier as 4px left edge only (no CRITICAL pill — council tone fix)
+    // Left edge (color cue) + always-visible text tier badge (not color-only)
     let bar = NSView(frame: NSRect(x: 0, y: 0, width: 4, height: clampedHeight))
     bar.wantsLayer = true
     bar.layer?.backgroundColor = accent.cgColor
     bar.layer?.cornerRadius = 2
     bar.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
+    bar.setAccessibilityElement(false)
     root.addSubview(bar)
 
-    // Quiet title — no tier word in string
+    let badge = tierBadge(
+      word: tierWord,
+      fg: badgeFg,
+      bg: badgeBg,
+      origin: NSPoint(x: padding + 4, y: clampedHeight - padding - 18 - progressH)
+    )
+    root.addSubview(badge)
+
+    let titleX = badge.frame.maxX + 8
     let titleLabel = makeLabel(
       title,
-      font: NSFont.systemFont(ofSize: 13, weight: .regular),
-      color: NSColor(calibratedWhite: 0.68, alpha: 1),
+      font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+      color: titleColor,
       frame: NSRect(
-        x: padding + 4,
+        x: titleX,
         y: clampedHeight - padding - titleH - progressH,
-        width: width - padding * 2 - 36,
+        width: max(40, width - titleX - 40),
         height: titleH
       )
     )
+    titleLabel.setAccessibilityLabel("Project: \(title)")
     root.addSubview(titleLabel)
 
     let msgY = padding + progressH + (hasSub ? subH + gap : 0)
     let msgLabel = makeLabel(
       message,
       font: msgFont,
-      color: .white,
+      color: bodyColor,
       frame: NSRect(x: padding + 4, y: msgY, width: msgWidth, height: msgHeight),
       maxLines: 2
     )
+    msgLabel.setAccessibilityLabel("Tip: \(message)")
     root.addSubview(msgLabel)
 
     if let sub = subtitle, !sub.isEmpty {
       let subLabel = makeLabel(
         sub,
         font: NSFont.systemFont(ofSize: 12, weight: .regular),
-        color: NSColor(calibratedWhite: 0.55, alpha: 1),
+        color: subColor,
         frame: NSRect(x: padding + 4, y: padding + progressH, width: msgWidth, height: subH)
       )
+      subLabel.setAccessibilityLabel(sub)
       root.addSubview(subLabel)
     }
 
-    // × close
+    // × close — higher contrast
     let closeSize: CGFloat = 28
     let close = NSButton(
       frame: NSRect(
@@ -131,22 +163,24 @@ final class ToastController: NSObject {
       )
     )
     close.title = "×"
-    close.font = NSFont.systemFont(ofSize: 18, weight: .medium)
+    close.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
     close.isBordered = false
     close.wantsLayer = true
     close.layer?.cornerRadius = closeSize / 2
-    close.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.08).cgColor
-    close.contentTintColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+    close.layer?.backgroundColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14).cgColor
+    close.contentTintColor = NSColor.white
     close.target = self
     close.action = #selector(closeClicked)
-    close.focusRingType = .none
-    close.toolTip = "Dismiss"
+    close.focusRingType = .exterior
+    close.toolTip = "Dismiss tip"
+    close.setAccessibilityLabel("Dismiss tip")
+    close.setAccessibilityRole(.button)
     root.addSubview(close)
 
-    // Progress hairline (accent drains left→right as time runs out = shrinks)
+    // Progress track + fill (color is secondary; motion encodes time)
     let track = CALayer()
     track.frame = CGRect(x: 4, y: 0, width: width - 4, height: progressH)
-    track.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.06).cgColor
+    track.backgroundColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.12).cgColor
     track.cornerRadius = 1.5
     root.layer?.addSublayer(track)
 
@@ -159,7 +193,6 @@ final class ToastController: NSObject {
 
     panel.contentView = root
 
-    // Hover pause tracking (owner is ClickView)
     root.onHover = { [weak self] inside in
       guard let self else { return }
       self.paused = inside
@@ -173,7 +206,6 @@ final class ToastController: NSObject {
     )
     root.addTrackingArea(tracking)
 
-    // Top-right of frontmost app's screen (else main), below menu bar
     let screen = screenForFrontmost() ?? NSScreen.main
     if let screen {
       let visible = screen.visibleFrame
@@ -190,14 +222,88 @@ final class ToastController: NSObject {
       panel.animator().alphaValue = 1
     }
 
+    // Optional: post accessibility announcement for VoiceOver users
+    NSAccessibility.post(
+      element: root,
+      notification: .announcementRequested,
+      userInfo: [
+        .announcement: "CodeLore tip. \(tierWord). \(message)" as NSString,
+        .priority: NSAccessibilityPriorityLevel.medium.rawValue as NSNumber,
+      ]
+    )
+
     startTimer()
   }
 
+  private static func tierDisplayName(_ tier: String) -> String {
+    switch tier {
+    case "critical": return "Critical"
+    case "gotcha": return "Gotcha"
+    case "changelog": return "Change"
+    case "onboarding": return "Intro"
+    case "convention": return "Convention"
+    case "stack", "structure": return "Stack"
+    default: return "Tip"
+    }
+  }
+
+  /// Accent + high-contrast badge pair (text never relies on color alone).
+  private static func tierColors(_ tier: String) -> (NSColor, NSColor, NSColor) {
+    switch tier {
+    case "critical":
+      // White on deep red — strong contrast
+      return (
+        NSColor(srgbRed: 0.95, green: 0.28, blue: 0.30, alpha: 1),
+        NSColor.white,
+        NSColor(srgbRed: 0.55, green: 0.10, blue: 0.12, alpha: 1)
+      )
+    case "gotcha":
+      // Near-black on solid amber
+      return (
+        NSColor(srgbRed: 0.95, green: 0.65, blue: 0.15, alpha: 1),
+        NSColor(srgbRed: 0.12, green: 0.10, blue: 0.05, alpha: 1),
+        NSColor(srgbRed: 0.95, green: 0.72, blue: 0.20, alpha: 1)
+      )
+    default:
+      // White on deep teal
+      return (
+        NSColor(srgbRed: 0.25, green: 0.78, blue: 0.88, alpha: 1),
+        NSColor.white,
+        NSColor(srgbRed: 0.08, green: 0.35, blue: 0.42, alpha: 1)
+      )
+    }
+  }
+
+  private func tierBadge(word: String, fg: NSColor, bg: NSColor, origin: NSPoint) -> NSView {
+    let font = NSFont.systemFont(ofSize: 11, weight: .bold)
+    let textW = (word as NSString).size(withAttributes: [.font: font]).width
+    let w = ceil(textW) + 14
+    let h: CGFloat = 20
+    let pill = NSView(frame: NSRect(x: origin.x, y: origin.y, width: w, height: h))
+    pill.wantsLayer = true
+    pill.layer?.cornerRadius = 10
+    pill.layer?.backgroundColor = bg.cgColor
+    // Visible border so badge isn't only fill color
+    pill.layer?.borderWidth = 1
+    pill.layer?.borderColor = fg.withAlphaComponent(0.35).cgColor
+    let label = makeLabel(
+      word,
+      font: font,
+      color: fg,
+      frame: NSRect(x: 0, y: 1, width: w, height: h - 2),
+      align: .center
+    )
+    label.setAccessibilityLabel("Severity: \(word)")
+    pill.addSubview(label)
+    pill.setAccessibilityElement(true)
+    pill.setAccessibilityRole(.staticText)
+    pill.setAccessibilityLabel("Severity \(word)")
+    return pill
+  }
+
   private func screenForFrontmost() -> NSScreen? {
-    // Prefer screen containing the frontmost app's key window if we can
-    if let app = NSWorkspace.shared.frontmostApplication,
-       let pid = app.processIdentifier as pid_t?
-    {
+    if let app = NSWorkspace.shared.frontmostApplication {
+      let pid = app.processIdentifier
       let opts = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
       if let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
         for w in info {
@@ -209,19 +315,13 @@ final class ToastController: NSObject {
             width: bounds["Width"] ?? 0,
             height: bounds["Height"] ?? 0
           )
-          // CG coords are top-left origin; convert roughly via screens
-          for s in NSScreen.screens {
-            if s.frame.intersects(cgToAppKit(rect, on: s)) { return s }
+          for s in NSScreen.screens where s.frame.intersects(rect) {
+            return s
           }
         }
       }
     }
     return NSScreen.main
-  }
-
-  private func cgToAppKit(_ r: CGRect, on screen: NSScreen) -> CGRect {
-    // Approximate: use primary height for flip if needed — intersect check is loose enough
-    return r
   }
 
   private func startTimer() {
@@ -288,6 +388,8 @@ final class ToastController: NSObject {
     l.maximumNumberOfLines = maxLines
     l.cell?.wraps = maxLines > 1
     l.cell?.isScrollable = false
+    l.setAccessibilityElement(true)
+    l.setAccessibilityRole(.staticText)
     return l
   }
 
@@ -310,7 +412,6 @@ final class ToastController: NSObject {
   }
 }
 
-/// Click-to-dismiss root; hover callbacks for timer pause.
 final class ClickView: NSView {
   var onClick: (() -> Void)?
   var onHover: ((Bool) -> Void)?
@@ -345,7 +446,6 @@ struct CodeloreToastMain {
     let message = flag("--message") ?? ""
     let subtitle = flag("--subtitle")
     let tier = flag("--tier") ?? "tip"
-    // Tier-based dwell (council)
     let defaultTimeout: String = {
       switch tier.lowercased() {
       case "critical": return "16"
@@ -363,7 +463,6 @@ struct CodeloreToastMain {
       exit(2)
     }
 
-    // Strip CRITICAL/GOTCHA words from title if present (pill removed; edge only)
     let cleanTitle =
       title
       .replacingOccurrences(of: " · CRITICAL", with: "", options: .caseInsensitive)
