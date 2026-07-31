@@ -612,28 +612,68 @@ function readText(path, max = 80_000) {
   }
 }
 
+/** Walk repo root + parents for .codelore/tips (nested package git repos inherit monorepo pack). */
+function findCodeloreTipsDirs(repoRoot) {
+  const dirs = [];
+  let cur = resolve(repoRoot);
+  for (let i = 0; i < 5; i++) {
+    const tipsDir = join(cur, ".codelore", "tips");
+    if (existsSync(tipsDir)) dirs.push(tipsDir);
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return dirs;
+}
+
 function loadCuratedTips(repoRoot) {
-  const tipsDir = join(repoRoot, ".codelore", "tips");
-  if (!existsSync(tipsDir)) return [];
   const tips = [];
-  for (const file of readdirSync(tipsDir)) {
-    if (!file.endsWith(".json")) continue;
-    try {
-      const doc = JSON.parse(readFileSync(join(tipsDir, file), "utf8"));
-      for (const t of doc.tips || []) {
-        if (t?.id && (t?.title || t?.body))
-          tips.push({ ...t, source: t.source || "curated", _curated: true });
+  const seenIds = new Set();
+  for (const tipsDir of findCodeloreTipsDirs(repoRoot)) {
+    for (const file of readdirSync(tipsDir)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const doc = JSON.parse(readFileSync(join(tipsDir, file), "utf8"));
+        for (const t of doc.tips || []) {
+          if (!t?.id || !(t?.title || t?.body)) continue;
+          if (seenIds.has(t.id)) continue;
+          seenIds.add(t.id);
+          tips.push({
+            ...t,
+            source: t.source || "curated",
+            _curated: true,
+            _quality: 100,
+          });
+        }
+      } catch {
+        /* skip */
       }
-    } catch {
-      /* skip */
     }
   }
   return tips;
 }
 
+/** Drop marketing / low-signal auto text (README feature lists, emoji checkmarks). */
+function isLowQualityTipText(text) {
+  const t = String(text || "");
+  if (/^[✅✓✔]|✅/.test(t)) return true;
+  if (/\b(feature|features|powered by|seamless|delight|beautiful)\b/i.test(t) && t.length < 80)
+    return true;
+  if (/^[-*]\s*[A-Z][\w\s]{3,40}$/.test(t)) return true; // bare feature noun
+  if (/key security features|what (we|you) (get|built)/i.test(t)) return true;
+  return false;
+}
+
+function isHighSignalBullet(text) {
+  return /\b(never|must|do not|don't|only|always|forbid|required|shall|pii|dpdpa|encrypted|consent|ownership|tenant)\b/i.test(
+    text,
+  );
+}
+
 function tipsFromAgentDocs(repoRoot, packageHint) {
   const tips = [];
-  const files = ["AGENTS.md", "CLAUDE.md", "Claude.md", ".claude/CLAUDE.md", "README.md"];
+  // Prefer CLAUDE/AGENTS over README (README is marketing-heavy)
+  const files = ["AGENTS.md", "CLAUDE.md", "Claude.md", ".claude/CLAUDE.md"];
   if (packageHint) {
     files.push(
       `${packageHint}/CLAUDE.md`,
@@ -641,8 +681,9 @@ function tipsFromAgentDocs(repoRoot, packageHint) {
       `${packageHint}/Claude.md`,
     );
   }
+  // README only if no curated pack and we need fallback — still filtered
   const interesting =
-    /gotcha|critical|never|important|warning|don.?t|pitfall|landmine|must|security|dpdpa|constraint|rule/i;
+    /never do|always do|gotcha|compliance|security|dpdpa|critical|warning|pitfall|constraint|rule/i;
 
   for (const rel of files) {
     const text = readText(join(repoRoot, rel));
@@ -654,22 +695,31 @@ function tipsFromAgentDocs(repoRoot, packageHint) {
 
     const flush = () => {
       if (!inInteresting || !bullets.length) return;
-      for (const b of bullets.slice(0, 4)) {
+      for (const b of bullets.slice(0, 6)) {
         const body = b
           .replace(/^[-*+]\s+/, "")
           .replace(/^\d+\.\s+/, "")
+          .replace(/^\*\*/, "")
+          .replace(/\*\*$/, "")
           .trim();
-        if (body.length < 16) continue;
+        if (body.length < 20) continue;
+        if (isLowQualityTipText(body)) continue;
+        // Prefer imperative landmines
+        if (!isHighSignalBullet(body) && !/never|must/i.test(section)) continue;
+        const clean = stripMd(body);
         tips.push({
-          id: `auto-doc-${hash(rel + section + body).slice(0, 10)}`,
-          title: clip(stripMd(body), 90),
-          body: `${section ? section + ": " : ""}${stripMd(body)}`,
-          tier: /critical|security|never|must|dpdpa/i.test(section + body)
+          id: `auto-doc-${hash(rel + section + clean).slice(0, 10)}`,
+          title: clip(clean, 100),
+          body: clean,
+          tier: /critical|security|never|must|dpdpa|pii|encrypted/i.test(
+            section + " " + clean,
+          )
             ? "critical"
             : "gotcha",
           tags: ["auto", "docs"],
           paths: [rel],
           source: "auto-docs",
+          _quality: isHighSignalBullet(clean) ? 70 : 40,
         });
       }
     };
@@ -698,9 +748,12 @@ function tipsFromGit(repoRoot) {
     for (const line of log.split("\n").filter(Boolean)) {
       const [hashPart, subject, ct] = line.split("|");
       if (!subject) continue;
-      if (/^(chore|ci|docs|style|test)(\(.+\))?:/i.test(subject) && n > 2) continue;
+      // Prefer feat/fix/security; skip docs/chore noise early
+      if (/^(chore|ci|docs|style|test|merge)(\(.+\))?:/i.test(subject)) continue;
+      if (!/^(feat|fix|security|perf|refactor)(\(|:)/i.test(subject) && n > 1)
+        continue;
       n++;
-      if (n > 5) break;
+      if (n > 3) break;
       const files =
         git(["show", "--name-only", "--pretty=format:", hashPart], repoRoot) || "";
       const paths = files
@@ -710,15 +763,16 @@ function tipsFromGit(repoRoot) {
         .slice(0, 4);
       tips.push({
         id: `auto-git-${hashPart}`,
-        title: clip(subject, 90),
+        title: clip(subject, 100),
         body: paths.length
-          ? `Recent: ${subject} · files: ${paths.join(", ")}`
-          : `Recent commit: ${subject}`,
+          ? `${subject} · touched: ${paths.slice(0, 3).join(", ")}`
+          : subject,
         tier: "changelog",
         tags: ["auto", "git"],
         paths,
         source: "auto-git",
         _ts: Number(ct) * 1000 || 0,
+        _quality: 45,
       });
     }
   }
@@ -797,12 +851,22 @@ function tipsFromStack(repoRoot, packageHint) {
 }
 
 function generateTips(ws) {
-  return [
-    ...loadCuratedTips(ws.root),
-    ...tipsFromAgentDocs(ws.root, ws.packageHint),
-    ...tipsFromGit(ws.root),
-    ...tipsFromStack(ws.root, ws.packageHint),
-  ].map(toTwoLines);
+  const curated = loadCuratedTips(ws.root);
+  // When a solid curated pack exists, auto sources are backup only (lower quality)
+  const auto =
+    curated.length >= 8
+      ? [
+          ...tipsFromAgentDocs(ws.root, ws.packageHint).slice(0, 6),
+          ...tipsFromGit(ws.root).slice(0, 2),
+        ]
+      : [
+          ...tipsFromAgentDocs(ws.root, ws.packageHint),
+          ...tipsFromGit(ws.root),
+          ...tipsFromStack(ws.root, ws.packageHint),
+        ];
+  return [...curated, ...auto]
+    .filter((t) => !isLowQualityTipText(t.title) && !isLowQualityTipText(t.body))
+    .map(toTwoLines);
 }
 
 // ─── ranking + seen ──────────────────────────────────────────────────────────
@@ -834,9 +898,12 @@ function saveState(fingerprint, state) {
 
 function scoreTip(tip, ctx) {
   let score = TIER_WEIGHT[tip.tier] ?? 25;
-  if (tip._curated) score += 15;
-  if (tip.source === "auto-docs") score += 10;
-  if (tip.source === "auto-git") score += 8;
+  // Human curated packs dominate auto-scraped fluff
+  if (tip._curated) score += 55;
+  if (typeof tip._quality === "number") score += tip._quality * 0.15;
+  if (tip.source === "auto-docs") score += 5;
+  if (tip.source === "auto-git") score += 3;
+  if (tip.source === "auto-stack") score -= 10;
   if (tip._ts) {
     const ageDays = (Date.now() - tip._ts) / 86400000;
     score += Math.max(0, 12 - ageDays);
@@ -851,6 +918,9 @@ function scoreTip(tip, ctx) {
   const paths = tip.paths || [];
   if (ctx.packageHint && paths.some((p) => String(p).includes(ctx.packageHint)))
     score += 25;
+  // Nested package repo (e.g. frontend as own git root): match tip paths to package name
+  if (ctx.repoName && paths.some((p) => String(p).includes(ctx.repoName)))
+    score += 22;
   const tag = (tip.tags || [])[0];
   if (tag && (ctx.state.lastTags || []).includes(tag)) score -= 12;
   score += (parseInt(hash(tip.id).slice(0, 6), 16) % 7) / 10;
@@ -1499,6 +1569,7 @@ async function main() {
       state,
       relativeCwd: ws.relativeCwd,
       packageHint: ws.packageHint,
+      repoName: ws.name,
     });
     if (!tip) process.exit(0);
 
