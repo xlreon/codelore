@@ -1192,9 +1192,34 @@ function deliverMacosToast(tip, ws) {
     };
   }
   // Council: no tier word in title — accent edge carries severity
+  // Pass FULL tip text to toast (no ellipsis). Prefer original body over clipped lines.
   const title = `CodeLore · ${ws.name}`;
-  const message = tip.line1 || "tip";
-  const subtitle = tip.line2 || "";
+  const fullBody = String(tip.body || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fullTitle = String(tip.title || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Message = primary readable tip; subtitle only if it adds non-duplicate detail
+  let message = fullTitle || tip.line1 || "tip";
+  let subtitle = "";
+  if (fullBody && !fuzzySame(fullBody, message)) {
+    if (fullBody.startsWith(message)) {
+      const rest = fullBody.slice(message.length).replace(/^[\s—–\-:]+/, "");
+      subtitle = rest;
+      // If title was short headline and body is the full sentence, show full body as message
+      if (message.length < 40 && fullBody.length > message.length + 10) {
+        message = fullBody;
+        subtitle = "";
+      }
+    } else {
+      // Prefer full body as the main message so nothing is cut mid-sentence
+      message = fullBody;
+      subtitle = "";
+    }
+  } else if (tip.line2 && !fuzzySame(tip.line2, message)) {
+    subtitle = tip.line2;
+  }
   try {
     const child = spawn(
       bin,

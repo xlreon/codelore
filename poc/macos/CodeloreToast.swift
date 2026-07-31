@@ -40,14 +40,19 @@ final class ToastController: NSObject {
     accent = accentColor
 
     let msgFont = NSFont.systemFont(ofSize: 15, weight: .medium)
+    let subFont = NSFont.systemFont(ofSize: 13, weight: .regular)
     let msgWidth = width - padding * 2 - 40
-    let msgHeight = measureHeight(message, font: msgFont, width: msgWidth, maxLines: 2)
+    // Full text — no ellipsis; grow toast to fit (cap only for pathological walls of text)
+    let msgHeight = measureHeight(message, font: msgFont, width: msgWidth, maxLines: 12)
     let titleH: CGFloat = 20
-    let subH: CGFloat = hasSub ? 18 : 0
+    let subH: CGFloat = hasSub
+      ? measureHeight(subtitle ?? "", font: subFont, width: msgWidth, maxLines: 8)
+      : 0
     let gap: CGFloat = 6
     let progressH: CGFloat = 3
     let height = padding + titleH + gap + msgHeight + (hasSub ? gap + subH : 0) + padding + progressH
-    let clampedHeight = max(96, min(height, 148))
+    let maxCard: CGFloat = min(420, (NSScreen.main?.visibleFrame.height ?? 800) * 0.45)
+    let clampedHeight = max(96, min(height, maxCard))
 
     let panel = NSPanel(
       contentRect: NSRect(x: 0, y: 0, width: width, height: clampedHeight),
@@ -136,7 +141,7 @@ final class ToastController: NSObject {
       font: msgFont,
       color: bodyColor,
       frame: NSRect(x: padding + 4, y: msgY, width: msgWidth, height: msgHeight),
-      maxLines: 2
+      maxLines: 0  // 0 = unlimited wrap, never truncate with …
     )
     msgLabel.setAccessibilityLabel("Tip: \(message)")
     root.addSubview(msgLabel)
@@ -144,9 +149,10 @@ final class ToastController: NSObject {
     if let sub = subtitle, !sub.isEmpty {
       let subLabel = makeLabel(
         sub,
-        font: NSFont.systemFont(ofSize: 12, weight: .regular),
+        font: subFont,
         color: subColor,
-        frame: NSRect(x: padding + 4, y: padding + progressH, width: msgWidth, height: subH)
+        frame: NSRect(x: padding + 4, y: padding + progressH, width: msgWidth, height: subH),
+        maxLines: 0
       )
       subLabel.setAccessibilityLabel(sub)
       root.addSubview(subLabel)
@@ -362,9 +368,13 @@ final class ToastController: NSObject {
       options: [.usesLineFragmentOrigin, .usesFontLeading],
       attributes: attr
     )
-    let lineH = font.ascender - font.descender + font.leading
-    let maxH = lineH * CGFloat(maxLines) + 6
-    return min(max(ceil(rect.height) + 2, 24), maxH)
+    let lineH = max(font.ascender - font.descender + font.leading, 18)
+    let natural = max(ceil(rect.height) + 4, 24)
+    if maxLines <= 0 {
+      return natural
+    }
+    let maxH = lineH * CGFloat(maxLines) + 8
+    return min(natural, maxH)
   }
 
   private func makeLabel(
@@ -384,9 +394,16 @@ final class ToastController: NSObject {
     l.font = font
     l.textColor = color
     l.alignment = align
-    l.lineBreakMode = maxLines > 1 ? .byWordWrapping : .byTruncatingTail
-    l.maximumNumberOfLines = maxLines
-    l.cell?.wraps = maxLines > 1
+    // Full text always: wrap, never … truncate (user must read complete tip)
+    if maxLines == 1 {
+      l.lineBreakMode = .byWordWrapping
+      l.maximumNumberOfLines = 3
+      l.cell?.wraps = true
+    } else {
+      l.lineBreakMode = .byWordWrapping
+      l.maximumNumberOfLines = maxLines == 0 ? 0 : maxLines
+      l.cell?.wraps = true
+    }
     l.cell?.isScrollable = false
     l.setAccessibilityElement(true)
     l.setAccessibilityRole(.staticText)
