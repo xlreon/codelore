@@ -1121,7 +1121,8 @@ function deliverMacosToast(tip, ws) {
       hint: "Build: swiftc -parse-as-library -O -o poc/bin/codelore-toast poc/macos/CodeloreToast.swift",
     };
   }
-  const title = `CodeLore · ${ws.name} · ${String(tip.tier || "tip").toUpperCase()}`;
+  // Council: no tier word in title — accent edge carries severity
+  const title = `CodeLore · ${ws.name}`;
   const message = tip.line1 || "tip";
   const subtitle = tip.line2 || "";
   try {
@@ -1135,8 +1136,6 @@ function deliverMacosToast(tip, ws) {
         ...(subtitle ? ["--subtitle", subtitle] : []),
         "--tier",
         String(tip.tier || "tip"),
-        "--timeout",
-        "12",
       ],
       { detached: true, stdio: "ignore" },
     );
@@ -1242,7 +1241,7 @@ function reportNotifyResult(result, quiet) {
   if (result.ok && result.backend === "toast") {
     if (!quiet)
       console.error(
-        `[codelore] toast shown (top-left, × to dismiss, no focus steal)`,
+        `[codelore] toast shown (top-right, × / click to dismiss, hover pauses)`,
       );
     return;
   }
@@ -1355,7 +1354,7 @@ async function main() {
       reportNotifyResult(result, false);
       if (!result.ok) process.exit(1);
       console.log(
-        `[codelore] look top-left for a floating toast (style=${style}). × closes it.`,
+        `[codelore] look top-right for a floating toast (style=${style}). × or click dismisses; hover pauses timer.`,
       );
       process.exit(0);
     }
