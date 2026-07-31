@@ -67,7 +67,7 @@ final class ToastController: NSObject {
     panel.worksWhenModal = true
     panel.alphaValue = 0
     // VoiceOver: announce as a notification-like status
-    panel.setAccessibilityRole(.dialog)
+    panel.setAccessibilityRole(.window)
     panel.setAccessibilityLabel("CodeLore tip")
     panel.setAccessibilityRoleDescription("tip notification")
 
