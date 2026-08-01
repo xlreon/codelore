@@ -1,41 +1,52 @@
 # CodeLore
 
-**Ambient codebase tips for AI-assisted developers** (Claude Code, Grok, terminal agents).
+**Ambient codebase tips for AI-assisted developers** — Claude Code, Grok, Cursor agents, anyone living in the terminal.
 
-When a session opens, CodeLore:
+When an AI coding session opens, CodeLore:
 
-1. Detects which codebase you’re in (or the most active one under a multi-repo parent)
-2. Generates a **1–2 line** tip from git, CLAUDE/AGENTS docs, and stack signals — **no hand-seeding required**
-3. Logs every tip to `~/.tips/tips-log.md`
-4. Lets you **select** which directories get tips when you live under a folder like `~/code`
+1. Detects which codebase you’re in (or the most-used repo under a multi-project parent)
+2. Surfaces **one high-signal tip** from curated local packs and/or auto-extracted rules (CLAUDE.md, AGENTS.md, recent git)
+3. Shows it as a **full-width terminal banner** and a **non-blocking macOS toast** (× to dismiss, hover pauses)
+4. Logs every tip to `~/.tips/tips-log.md`
 
-> Private POC. Zero npm dependencies for the script.
+Tip **data stays local** (your packs, your history). This package ships the tool only.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Why
+
+AI agents ship large diffs faster than humans re-absorb tribal knowledge. `AGENTS.md` is long; chat transcripts die; gotchas live in three people’s heads. CodeLore drips one landmine at session boundaries — peripheral attention, not another wiki.
 
 ## Quick start
 
 ```bash
+git clone https://github.com/xlreon/codelore.git
+cd codelore
+
 # One-time: choose which codebases under ~/code get tips
 node poc/codelore.mjs select --cwd ~/code --all
 
-# Show a tip for the current directory
+# Tip for current directory
 node poc/codelore.mjs tip --cwd "$PWD" --force
 
-# Terminal + macOS notification
-node poc/codelore.mjs tip --cwd "$PWD" --channel both --force
+# Terminal + macOS toast
+node poc/codelore.mjs tip --cwd "$PWD" --channel both --notify toast --force
 
-# History of tips shown
+# History
 node poc/codelore.mjs log
 ```
 
-### Files written on your machine
+### macOS toast (optional)
 
-| Path | Purpose |
-|------|---------|
-| `~/.tips/config.json` | Watch list (`all` or selected dirs) |
-| `~/.tips/tips-log.md` | Append-only log of every tip shown |
-| `~/.codelore/state/` | Per-repo seen / cooldown |
+```bash
+bash poc/macos/build.sh   # requires Xcode CLI tools / swiftc
+```
+
+Produces `poc/bin/codelore-toast` — floating non-activating panel (top-right, ×, full text, no focus steal).
 
 ## Claude Code SessionStart
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -43,38 +54,45 @@ node poc/codelore.mjs log
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "node /ABSOLUTE/PATH/TO/codelore/poc/codelore.mjs tip --reason session-start --channel both --cwd \"$PWD\""
+        "command": "node /ABSOLUTE/PATH/TO/codelore/poc/codelore.mjs tip --reason session-start --channel both --notify toast --cwd \"$PWD\"",
+        "timeout": 20
       }]
     }]
   }
 }
 ```
 
-Run `select` once first. Hooks are non-interactive and quiet-fail so a missing install never blocks a session.
+Hooks quiet-fail so a broken install never blocks a session.
 
-## Commands
+## Local files (never shipped in this repo)
 
-| Command | What it does |
-|---------|----------------|
-| `select --cwd DIR [--all]` | **Required** for multi-repo parents — pick all or specific dirs |
-| `tip` | Resolve workspace → auto tip → deliver → log |
-| `list` | Ranked codebases (`*` = watched) |
-| `detect` | JSON workspace resolution |
-| `watched` | Show config |
-| `log` | Tail `~/.tips/tips-log.md` |
+| Path | Purpose |
+|------|---------|
+| `~/.tips/config.json` | Watch list (`all` or selected dirs) |
+| `~/.tips/tips-log.md` | Append-only log of every tip shown |
+| `~/.codelore/state/` | Per-repo seen / cooldown |
+| `<your-repo>/.codelore/tips/*.json` | **Your** curated tip packs (private) |
 
-## POC status
+See [docs/tip-pack-format.md](docs/tip-pack-format.md) for the JSON shape.
 
-Working today:
+## Timing
 
-- Multi-repo frecency + mandated directory selection  
-- Auto tips from docs / git / stack (curated packs optional)  
-- 1–2 line max formatting  
-- Terminal + macOS (`osascript`) + JSON  
-- Tip log under `~/.tips/`  
+| Timer | Default |
+|-------|---------|
+| Gap between tips (per repo) | **30 minutes** (bypass with `--force`) |
+| Toast on-screen | **8s** tip / **12s** gotcha / **16s** critical (hover pauses) |
 
-Not yet: packaged npm CLI, YAML packs, LLM-polished tips, capture-on-agent-correction.
+## Status
+
+Working POC:
+
+- Multi-repo detection + mandated directory select  
+- Curated packs + filtered auto tips (docs/git)  
+- Terminal full-width banner + macOS toast  
+- SessionStart integration  
+
+Not yet: npm publish, YAML packs, harvest/approve CLI, full test suite.
 
 ## License
 
-MIT (planned). Private repo for now.
+[MIT](LICENSE) © Sidharth Satapathy
