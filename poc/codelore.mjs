@@ -27,19 +27,30 @@ import { fileURLToPath } from "node:url";
 import { stdin as input, stdout as output } from "node:process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const COOLDOWN_MS = 30 * 60 * 1000;
+const DEFAULT_INTERVAL = "30m";
 const SCAN_DEPTH = 2;
 const MAX_CANDIDATE_REPOS = 50;
 const MULTI_REPO_THRESHOLD = 2; // mandate selection when ≥ this many candidates
 const TIPS_HOME = process.env.CODELORE_TIPS_HOME || join(homedir(), ".tips");
+/** Presets users can pick for tip gap (time between notifications per repo). */
+const INTERVAL_PRESETS = {
+  "5m": 5 * 60 * 1000,
+  "15m": 15 * 60 * 1000,
+  "30m": 30 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+  "2h": 2 * 60 * 60 * 1000,
+  "6h": 6 * 60 * 60 * 1000,
+  "1d": 24 * 60 * 60 * 1000,
+  off: Number.MAX_SAFE_INTEGER, // effectively never auto-show (manual --force only)
+};
 const TIER_WEIGHT = {
   critical: 100,
   gotcha: 70,
   convention: 50,
-  changelog: 55,
+  changelog: 15, // raw commits are weak signal — almost never win over curated
   onboarding: 35,
   structure: 40,
-  stack: 45,
+  stack: 20,
 };
 
 // ─── paths under ~/.tips ─────────────────────────────────────────────────────
@@ -57,28 +68,66 @@ function logPath() {
   return join(ensureTipsHome(), "tips-log.md");
 }
 
+function defaultConfig() {
+  return {
+    version: 1,
+    watchMode: "unset",
+    watched: [],
+    configuredParents: [],
+    /** Gap between tips per repo: 5m | 15m | 30m | 1h | 2h | 6h | 1d | off */
+    interval: DEFAULT_INTERVAL,
+    /** Include raw git commit subjects as tips (noisy — default off) */
+    includeGitCommits: false,
+    /** Include high-churn file tips (default on) */
+    includeGitChurn: true,
+  };
+}
+
 function loadConfig() {
   const p = configPath();
-  if (!existsSync(p)) {
-    return {
-      version: 1,
-      // mode: "unset" | "all" | "selected"
-      watchMode: "unset",
-      // absolute paths of allowed repos when watchMode === "selected"
-      watched: [],
-      // parents the user has configured (e.g. ~/code)
-      configuredParents: [],
-    };
-  }
+  if (!existsSync(p)) return defaultConfig();
   try {
-    return { watchMode: "unset", watched: [], configuredParents: [], ...JSON.parse(readFileSync(p, "utf8")) };
+    return { ...defaultConfig(), ...JSON.parse(readFileSync(p, "utf8")) };
   } catch {
-    return { version: 1, watchMode: "unset", watched: [], configuredParents: [] };
+    return defaultConfig();
   }
 }
 
 function saveConfig(cfg) {
   writeFileSync(configPath(), JSON.stringify(cfg, null, 2) + "\n");
+}
+
+/** Parse "30m" / "1h" / "2h" / ms number → ms. */
+function parseInterval(raw) {
+  if (raw == null || raw === "") return INTERVAL_PRESETS[DEFAULT_INTERVAL];
+  const s = String(raw).trim().toLowerCase();
+  if (INTERVAL_PRESETS[s] != null) return INTERVAL_PRESETS[s];
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const u = m[2] || "m";
+  const mult =
+    u === "ms" ? 1 : u === "s" ? 1000 : u === "m" ? 60000 : u === "h" ? 3600000 : 86400000;
+  return Math.max(0, Math.floor(n * mult));
+}
+
+function formatInterval(ms) {
+  if (ms >= Number.MAX_SAFE_INTEGER / 2) return "off";
+  if (ms % 86400000 === 0) return `${ms / 86400000}d`;
+  if (ms % 3600000 === 0) return `${ms / 3600000}h`;
+  if (ms % 60000 === 0) return `${ms / 60000}m`;
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
+}
+
+function resolveCooldownMs(cfg, cliInterval) {
+  if (cliInterval != null) {
+    const ms = parseInterval(cliInterval);
+    if (ms == null) return null;
+    return ms;
+  }
+  const ms = parseInterval(cfg.interval || DEFAULT_INTERVAL);
+  return ms ?? INTERVAL_PRESETS[DEFAULT_INTERVAL];
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -99,13 +148,23 @@ function parseArgs(argv) {
     selectAll: false,
     selectNone: false,
     nonInteractive: false,
+    interval: null, // e.g. 15m | 1h | off — null = use config
+    includeGitCommits: null, // null = config default (false)
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (
-      ["tip", "list", "detect", "select", "log", "watched", "notify-test"].includes(
-        a,
-      )
+      [
+        "tip",
+        "list",
+        "detect",
+        "select",
+        "log",
+        "watched",
+        "notify-test",
+        "interval",
+        "config",
+      ].includes(a)
     ) {
       out.cmd = a;
       continue;
@@ -115,12 +174,18 @@ function parseArgs(argv) {
     else if (a === "--all") out.selectAll = true;
     else if (a === "--clear") out.selectNone = true;
     else if (a === "--yes" || a === "-y") out.nonInteractive = true;
+    else if (a === "--include-git-commits") out.includeGitCommits = true;
+    else if (a === "--no-git-commits") out.includeGitCommits = false;
     else if (a === "--channel" && argv[i + 1]) out.channel = argv[++i];
     else if (a === "--notify" && argv[i + 1]) out.notifyStyle = argv[++i]; // dialog|banner|both
     else if (a === "--reason" && argv[i + 1]) out.reason = argv[++i];
     else if (a === "--cwd" && argv[i + 1]) out.cwd = resolve(argv[++i]);
     else if (a === "--repo" && argv[i + 1]) out.pick = resolve(argv[++i]);
+    else if ((a === "--interval" || a === "-i") && argv[i + 1])
+      out.interval = argv[++i];
     else if (a === "--help" || a === "-h") out.help = true;
+    else if (out.cmd === "interval" && !a.startsWith("-") && !out.interval)
+      out.interval = a;
   }
   // Session hooks are never interactive
   if (out.reason === "session-start") out.nonInteractive = true;
@@ -745,65 +810,86 @@ function tipsFromAgentDocs(repoRoot, packageHint) {
   return tips;
 }
 
-function tipsFromGit(repoRoot) {
+/**
+ * Git-derived tips. Raw commit subjects are usually noise ("fix: typos") —
+ * off by default. High-churn file lists are opt-in via config (default on).
+ */
+function tipsFromGit(repoRoot, { includeCommits = false, includeChurn = true } = {}) {
   const tips = [];
-  const log = git(["log", "-12", "--pretty=format:%h|%s|%ct", "--no-merges"], repoRoot);
-  if (log) {
-    let n = 0;
-    for (const line of log.split("\n").filter(Boolean)) {
-      const [hashPart, subject, ct] = line.split("|");
-      if (!subject) continue;
-      // Prefer feat/fix/security; skip docs/chore noise early
-      if (/^(chore|ci|docs|style|test|merge)(\(.+\))?:/i.test(subject)) continue;
-      if (!/^(feat|fix|security|perf|refactor)(\(|:)/i.test(subject) && n > 1)
-        continue;
-      n++;
-      if (n > 3) break;
-      const files =
-        git(["show", "--name-only", "--pretty=format:", hashPart], repoRoot) || "";
-      const paths = files
-        .split("\n")
-        .map((f) => f.trim())
-        .filter(Boolean)
-        .slice(0, 4);
-      tips.push({
-        id: `auto-git-${hashPart}`,
-        title: clip(subject, 100),
-        body: paths.length
-          ? `${subject} · touched: ${paths.slice(0, 3).join(", ")}`
-          : subject,
-        tier: "changelog",
-        tags: ["auto", "git"],
-        paths,
-        source: "auto-git",
-        _ts: Number(ct) * 1000 || 0,
-        _quality: 45,
-      });
+
+  if (includeCommits) {
+    const log = git(
+      ["log", "-12", "--pretty=format:%h|%s|%ct", "--no-merges"],
+      repoRoot,
+    );
+    if (log) {
+      let n = 0;
+      for (const line of log.split("\n").filter(Boolean)) {
+        const [hashPart, subject, ct] = line.split("|");
+        if (!subject) continue;
+        // Skip meta/tooling commit noise
+        if (/^(chore|ci|docs|style|test|merge)(\(.+\))?:/i.test(subject)) continue;
+        if (/\b(typo|readme|license|gitignore|bump|wip)\b/i.test(subject)) continue;
+        // Only security/feat with human-readable body, not "fix: preserve underscores..."
+        if (!/^(feat|security)(\(.+\))?:/i.test(subject)) continue;
+        if (subject.length < 24) continue;
+        n++;
+        if (n > 2) break;
+        const files =
+          git(["show", "--name-only", "--pretty=format:", hashPart], repoRoot) ||
+          "";
+        const paths = files
+          .split("\n")
+          .map((f) => f.trim())
+          .filter(Boolean)
+          .slice(0, 4);
+        tips.push({
+          id: `auto-git-${hashPart}`,
+          title: clip(subject.replace(/^(feat|security)(\(.+\))?:\s*/i, ""), 100),
+          body: paths.length
+            ? `Recent change · files: ${paths.slice(0, 3).join(", ")}`
+            : "Recent meaningful commit in this repo.",
+          tier: "changelog",
+          tags: ["auto", "git"],
+          paths,
+          source: "auto-git",
+          _ts: Number(ct) * 1000 || 0,
+          _quality: 25,
+        });
+      }
     }
   }
 
-  const churn = git(["log", "-30", "--name-only", "--pretty=format:"], repoRoot);
-  if (churn) {
-    const counts = new Map();
-    for (const f of churn.split("\n")) {
-      const p = f.trim();
-      if (!p || p.endsWith(".lock") || p.includes("node_modules")) continue;
-      counts.set(p, (counts.get(p) || 0) + 1);
-    }
-    const top = [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .filter(([, c]) => c >= 3);
-    if (top.length) {
-      tips.push({
-        id: `auto-churn-${hash(top.map((x) => x[0]).join()).slice(0, 10)}`,
-        title: "High-churn files — read before big agent edits",
-        body: top.map(([p, c]) => `${p} (${c}×)`).join(" · "),
-        tier: "gotcha",
-        tags: ["auto", "churn"],
-        paths: top.map(([p]) => p),
-        source: "auto-git",
-      });
+  if (includeChurn) {
+    const churn = git(
+      ["log", "-30", "--name-only", "--pretty=format:"],
+      repoRoot,
+    );
+    if (churn) {
+      const counts = new Map();
+      for (const f of churn.split("\n")) {
+        const p = f.trim();
+        if (!p || p.endsWith(".lock") || p.includes("node_modules")) continue;
+        if (/\.(md|txt|json|yml|yaml)$/i.test(p) && !/CLAUDE|AGENTS|config/i.test(p))
+          continue;
+        counts.set(p, (counts.get(p) || 0) + 1);
+      }
+      const top = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .filter(([, c]) => c >= 4);
+      if (top.length) {
+        tips.push({
+          id: `auto-churn-${hash(top.map((x) => x[0]).join()).slice(0, 10)}`,
+          title: "High-churn files — read before large agent edits",
+          body: top.map(([p, c]) => `${p} (${c}× recently)`).join(" · "),
+          tier: "gotcha",
+          tags: ["auto", "churn"],
+          paths: top.map(([p]) => p),
+          source: "auto-git",
+          _quality: 35,
+        });
+      }
     }
   }
   return tips;
@@ -855,23 +941,44 @@ function tipsFromStack(repoRoot, packageHint) {
   return tips;
 }
 
-function generateTips(ws) {
+function generateTips(ws, opts = {}) {
   const curated = loadCuratedTips(ws.root);
-  // When a solid curated pack exists, auto sources are backup only (lower quality)
+  const includeCommits = opts.includeGitCommits === true;
+  const includeChurn = opts.includeGitChurn !== false;
+  const gitTips = tipsFromGit(ws.root, { includeCommits, includeChurn });
+  // Curated packs dominate; auto is backup only
   const auto =
-    curated.length >= 8
+    curated.length >= 3
       ? [
-          ...tipsFromAgentDocs(ws.root, ws.packageHint).slice(0, 6),
-          ...tipsFromGit(ws.root).slice(0, 2),
+          ...tipsFromAgentDocs(ws.root, ws.packageHint).slice(0, 8),
+          ...gitTips.slice(0, includeCommits ? 2 : 1),
         ]
       : [
           ...tipsFromAgentDocs(ws.root, ws.packageHint),
-          ...tipsFromGit(ws.root),
-          ...tipsFromStack(ws.root, ws.packageHint),
+          ...gitTips,
+          // stack tips only if almost nothing else
+          ...(curated.length === 0 ? tipsFromStack(ws.root, ws.packageHint) : []),
         ];
   return [...curated, ...auto]
     .filter((t) => !isLowQualityTipText(t.title) && !isLowQualityTipText(t.body))
+    .filter((t) => {
+      // Never surface raw conventional-commit noise as the tip body
+      if (t.source === "auto-git" && /^(feat|fix|chore|docs|refactor)(\(.+\))?:/i.test(t.title || ""))
+        return false;
+      return true;
+    })
     .map(toTwoLines);
+}
+
+/** Prefer silence over junk when nothing high-signal remains. */
+function isWorthShowing(tip) {
+  if (!tip) return false;
+  if (tip._curated || tip.source === "human" || tip.source === "curated") return true;
+  if (tip.source === "auto-docs" && (tip._quality || 0) >= 40) return true;
+  if (tip.source === "auto-git" && tip.tier === "gotcha") return true; // churn only
+  if (tip.source === "auto-git" && tip.tier === "changelog") return false;
+  if (tip.source === "auto-stack") return false;
+  return (tip._quality || 0) >= 50;
 }
 
 // ─── ranking + seen ──────────────────────────────────────────────────────────
@@ -1416,25 +1523,37 @@ function hash(s) {
 }
 
 function usage() {
-  console.log(`CodeLore POC v3 — 1–2 line tips · ~/.tips log · mandated dir select
+  console.log(`CodeLore — ambient tips for AI coding sessions
 
 Usage:
   node poc/codelore.mjs select [--cwd ~/code] [--all]
-      Interactive (or --all): choose which codebases get tips. REQUIRED when many dirs.
+  node poc/codelore.mjs tip [options]
+  node poc/codelore.mjs interval <5m|15m|30m|1h|2h|6h|1d|off>
+  node poc/codelore.mjs list|detect|watched|log|config
 
-  node poc/codelore.mjs tip [--cwd DIR] [--channel terminal|macos|both|json]
-  node poc/codelore.mjs list|detect|watched|log
+Tip options:
+  --cwd DIR              workspace (default: $PWD)
+  --channel terminal|macos|both|json
+  --notify toast|banner|dialog
+  --interval|-i 30m      gap between tips for this run (or set permanently via interval cmd)
+  --force                ignore cooldown
+  --include-git-commits  allow raw commit subjects as tips (off by default — usually noise)
+  --reason session-start quiet-fail for hooks
 
-Tips:
-  Always 1 line, max 2 lines. Logged to ~/.tips/tips-log.md
+How often tips show (gap per repo):
+  5m  15m  30m(default)  1h  2h  6h  1d  off
+  Set:  node poc/codelore.mjs interval 1h
+  See:  node poc/codelore.mjs config
 
-Config:
-  ~/.tips/config.json   watchMode all|selected + watched paths
-  ~/.tips/tips-log.md   append-only history of every tip shown
+Toast on-screen (not the gap): critical 16s · gotcha 12s · tip 8s (hover pauses)
+
+Config files (local only):
+  ~/.tips/config.json    watchMode, interval, flags
+  ~/.tips/tips-log.md    every tip shown
+  <repo>/.codelore/tips  your curated packs (preferred over auto)
 
 SessionStart:
-  node .../codelore.mjs tip --reason session-start --channel both --cwd "$PWD"
-  (non-interactive; run "select" once first if under a multi-repo parent)
+  node .../codelore.mjs tip --reason session-start --channel both --notify toast --cwd "$PWD"
 `);
 }
 
@@ -1489,13 +1608,52 @@ async function main() {
       process.exit(0);
     }
 
-    if (args.cmd === "watched") {
+    if (args.cmd === "interval" || (args.cmd === "config" && args.interval)) {
       const cfg = loadConfig();
-      console.log(`config: ${configPath()}`);
-      console.log(`watchMode: ${cfg.watchMode}`);
-      if (cfg.watchMode === "all") console.log("watching: ALL discovered repos");
-      else if (!cfg.watched?.length) console.log("watching: (none — run select)");
-      else cfg.watched.forEach((w) => console.log(`  · ${w}`));
+      if (!args.interval) {
+        console.log(`interval: ${cfg.interval || DEFAULT_INTERVAL} (${formatInterval(resolveCooldownMs(cfg, null))} gap between tips)`);
+        console.log(`presets:  ${Object.keys(INTERVAL_PRESETS).join("  ")}`);
+        console.log(`set:      node ${join(__dirname, "codelore.mjs")} interval 1h`);
+        process.exit(0);
+      }
+      const ms = parseInterval(args.interval);
+      if (ms == null) {
+        console.error(
+          `[codelore] invalid interval "${args.interval}". Use: ${Object.keys(INTERVAL_PRESETS).join(" | ")}`,
+        );
+        process.exit(1);
+      }
+      // Store canonical preset key when possible
+      const key =
+        Object.entries(INTERVAL_PRESETS).find(([, v]) => v === ms)?.[0] ||
+        formatInterval(ms);
+      cfg.interval = key;
+      saveConfig(cfg);
+      console.log(`[codelore] interval set to ${key} (${formatInterval(ms)} between tips per repo)`);
+      console.log(`[codelore] saved → ${configPath()}`);
+      if (key === "off")
+        console.log("[codelore] auto tips disabled; use tip --force to show manually");
+      process.exit(0);
+    }
+
+    if (args.cmd === "config" || args.cmd === "watched") {
+      const cfg = loadConfig();
+      const cool = resolveCooldownMs(cfg, null);
+      console.log(`config:     ${configPath()}`);
+      console.log(`watchMode:  ${cfg.watchMode}`);
+      console.log(
+        `interval:   ${cfg.interval || DEFAULT_INTERVAL}  (${formatInterval(cool)} between tips; presets: ${Object.keys(INTERVAL_PRESETS).join(", ")})`,
+      );
+      console.log(
+        `git commits as tips: ${cfg.includeGitCommits ? "on" : "off"}  (default off — use --include-git-commits)`,
+      );
+      console.log(`git churn tips:      ${cfg.includeGitChurn === false ? "off" : "on"}`);
+      if (cfg.watchMode === "all") console.log("watching:   ALL discovered repos");
+      else if (!cfg.watched?.length) console.log("watching:   (none — run select)");
+      else {
+        console.log("watching:");
+        cfg.watched.forEach((w) => console.log(`  · ${w}`));
+      }
       process.exit(0);
     }
 
@@ -1605,18 +1763,36 @@ async function main() {
     // Exception: if watchMode selected and user only wants certain dirs, respect when
     // they're in a multi-configured parent... For simplicity: direct cwd-in-repo always tips.
 
+    const cooldownMs = resolveCooldownMs(cfg, args.interval);
+    if (cooldownMs == null) {
+      console.error(
+        `[codelore] invalid --interval "${args.interval}". Use: ${Object.keys(INTERVAL_PRESETS).join(" | ")}`,
+      );
+      process.exit(quietFail ? 0 : 1);
+    }
+
     const state = loadState(ws.fingerprint);
     if (
       !args.force &&
       state.lastShownAt &&
-      Date.now() - Date.parse(state.lastShownAt) < COOLDOWN_MS
+      Date.now() - Date.parse(state.lastShownAt) < cooldownMs
     ) {
       process.exit(0);
     }
 
-    const tips = generateTips(ws);
+    const includeGitCommits =
+      args.includeGitCommits != null
+        ? args.includeGitCommits
+        : cfg.includeGitCommits === true;
+    const tips = generateTips(ws, {
+      includeGitCommits,
+      includeGitChurn: cfg.includeGitChurn !== false,
+    });
     if (!tips.length) {
-      console.error(`[codelore] no tips for ${ws.name}`);
+      if (!quietFail)
+        console.error(
+          `[codelore] no high-signal tips for ${ws.name} — add .codelore/tips/*.json or CLAUDE.md "Never Do" rules`,
+        );
       process.exit(quietFail ? 0 : 1);
     }
 
@@ -1626,7 +1802,13 @@ async function main() {
       packageHint: ws.packageHint,
       repoName: ws.name,
     });
-    if (!tip) process.exit(0);
+    if (!tip || !isWorthShowing(tip)) {
+      if (!quietFail && tip)
+        console.error(
+          `[codelore] skipped low-signal tip (${tip.source}) — seed .codelore/tips/ for better lore`,
+        );
+      process.exit(quietFail ? 0 : tip ? 0 : 1);
+    }
 
     // Guarantee 2-line shape
     const shaped = toTwoLines(tip);
@@ -1637,7 +1819,7 @@ async function main() {
       if (ch === "terminal" || ch === "both")
         deliverTerminal(shaped, ws, args.plain);
       if (ch === "macos" || ch === "both") {
-        const result = deliverMacos(shaped, ws, args.notifyStyle || "dialog");
+        const result = deliverMacos(shaped, ws, args.notifyStyle || "toast");
         reportNotifyResult(result, quietFail);
         if (!result.ok && ch === "macos") {
           deliverTerminal(shaped, ws, args.plain);

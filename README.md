@@ -77,10 +77,14 @@ See [docs/tip-pack-format.md](docs/tip-pack-format.md) for the JSON shape.
 
 ## Timing
 
-| Timer | Default |
-|-------|---------|
-| Gap between tips (per repo) | **30 minutes** (bypass with `--force`) |
-| Toast on-screen | **8s** tip / **12s** gotcha / **16s** critical (hover pauses) |
+| Timer | Default | Configure |
+|-------|---------|-----------|
+| Gap between tips (per repo) | **30 minutes** | `node poc/codelore.mjs interval 1h` · presets: `5m 15m 30m 1h 2h 6h 1d off` |
+| One-shot override | — | `tip --interval 15m` |
+| Bypass gap | — | `tip --force` |
+| Toast on-screen | **8s** / **12s** / **16s** by tier | hover pauses; × dismisses |
+
+Raw git commit subjects are **off by default** (they look random). Prefer curated `.codelore/tips/` or CLAUDE “Never Do” rules. Opt in with `--include-git-commits` if you want them.
 
 ## Status
 
