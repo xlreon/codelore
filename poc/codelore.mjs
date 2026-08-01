@@ -87,7 +87,9 @@ function loadConfig() {
   const p = configPath();
   if (!existsSync(p)) return defaultConfig();
   try {
-    return { ...defaultConfig(), ...JSON.parse(readFileSync(p, "utf8")) };
+    // Strip UTF-8 BOM (common on Windows PowerShell Set-Content -Encoding utf8)
+    const raw = readFileSync(p, "utf8").replace(/^\uFEFF/, "");
+    return { ...defaultConfig(), ...JSON.parse(raw) };
   } catch {
     return defaultConfig();
   }
@@ -132,11 +134,18 @@ function resolveCooldownMs(cfg, cliInterval) {
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
+function defaultChannel() {
+  // Desktop toast on macOS + Windows so session tips show in the top corner
+  // (Action Center / floating toast), not only as terminal scrollback.
+  if (process.platform === "darwin" || process.platform === "win32") return "both";
+  return "terminal";
+}
+
 function parseArgs(argv) {
   const out = {
     cmd: "tip",
-    // Default both on macOS so session tips actually notify
-    channel: process.platform === "darwin" ? "both" : "terminal",
+    // Default both on macOS/Windows so session tips actually notify
+    channel: defaultChannel(),
     // toast = non-activating floating panel with × (default)
     // banner = tiny NC toast; dialog = blocking center alert (avoid)
     notifyStyle: "toast",
@@ -1470,10 +1479,17 @@ function deliverMacosBanner(tip, ws) {
 }
 
 function reportNotifyResult(result, quiet) {
-  if (result.ok && result.backend === "toast") {
+  if (result.ok && (result.backend === "toast" || result.backend === "winrt-toast")) {
     if (!quiet)
       console.error(
-        `[codelore] toast shown (top-right, × / click to dismiss, hover pauses)`,
+        `[codelore] toast shown (top-right / Action Center — dismiss from OS UI)`,
+      );
+    return;
+  }
+  if (result.ok && result.backend === "balloon") {
+    if (!quiet)
+      console.error(
+        `[codelore] balloon tip shown (Windows fallback — bottom-right tray)`,
       );
     return;
   }
@@ -1493,6 +1509,129 @@ function reportNotifyResult(result, quiet) {
   if (result.hint) console.error(`[codelore] ${result.hint}`);
 }
 
+/** Windows top-right toast (WinRT) with balloon fallback. Zero npm deps. */
+function deliverWindows(tip, ws, style = "toast") {
+  const script = join(__dirname, "windows", "show-toast.ps1");
+  if (!existsSync(script)) {
+    return {
+      ok: false,
+      backend: null,
+      error: "poc/windows/show-toast.ps1 missing",
+    };
+  }
+
+  const title = `CodeLore · ${ws.name}`;
+  const message = String(tip.line1 || tip.title || "tip").replace(/\s+/g, " ").trim();
+  const subtitle = String(tip.line2 || "").replace(/\s+/g, " ").trim();
+  const tier = String(tip.tier || "tip");
+  const durationMs =
+    tier === "critical" ? 16000 : tier === "gotcha" ? 12000 : 8000;
+
+  // style=banner forces balloon; toast tries WinRT first (script handles fallback)
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script,
+    "-Title",
+    title,
+    "-Message",
+    message,
+    "-Tier",
+    tier,
+    "-DurationMs",
+    String(durationMs),
+  ];
+  if (subtitle) {
+    args.push("-Subtitle", subtitle);
+  }
+
+  try {
+    if (style === "banner" || style === "dialog") {
+      // Balloon is the non-WinRT path; script still tries WinRT first unless we only want balloon.
+      // For banner, still use the script (WinRT toast is the corner UI users expect).
+    }
+    const out = execFileSync("powershell.exe", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000,
+      windowsHide: true,
+    }).trim();
+    const backend = out.split(/\r?\n/).filter(Boolean).pop() || "windows";
+    return { ok: true, backend };
+  } catch (e) {
+    return {
+      ok: false,
+      backend: null,
+      error: e.message || String(e),
+      hint: "Allow notifications for PowerShell / Terminal in Windows Settings → System → Notifications",
+    };
+  }
+}
+
+/**
+ * Platform-native corner toast: macOS floating panel, Windows Action Center.
+ * Linux: not implemented (terminal only).
+ */
+function deliverDesktop(tip, ws, style = "toast") {
+  if (process.platform === "darwin") return deliverMacos(tip, ws, style);
+  if (process.platform === "win32") return deliverWindows(tip, ws, style);
+  return {
+    ok: false,
+    backend: null,
+    error: `desktop toast not supported on ${process.platform}`,
+    hint: "use --channel terminal",
+  };
+}
+
+/** Agent-readable session tip (Grok SessionStart stdout is ignored). */
+function sessionTipPath() {
+  return join(ensureTipsHome(), "session-tip.md");
+}
+
+function writeSessionTipFile(tip, ws) {
+  const lines = (tip.displayLines || [tip.line1, tip.line2].filter(Boolean)).map(
+    (l) => String(l).trim(),
+  );
+  const md = [
+    "# CodeLore - session tip",
+    "",
+    `**Repo:** \`${ws.name}\`${ws.packageHint ? ` / \`${ws.packageHint}\`` : ""}`,
+    `**Tier:** ${tip.tier || "tip"} | **Source:** ${tip.source || "unknown"}`,
+    `**Id:** \`${tip.id || "?"}\``,
+    "",
+    "## Tip",
+    "",
+    ...lines.map((l) => `> ${l}`),
+    "",
+    `Generated: ${new Date().toISOString()}`,
+    "",
+    "_Surfaced at session start. One landmine - not a full wiki. Log: ~/.tips/tips-log.md._",
+    "",
+  ].join("\n");
+  writeFileSync(sessionTipPath(), md, "utf8");
+  writeFileSync(
+    join(ensureTipsHome(), "session-tip.json"),
+    JSON.stringify(
+      {
+        ok: true,
+        id: tip.id,
+        line1: tip.line1,
+        line2: tip.line2 || null,
+        tier: tip.tier,
+        source: tip.source,
+        repo: ws.name,
+        repoRoot: ws.root,
+        generatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
 function deliverJson(tip, ws) {
   console.log(
     JSON.stringify(
@@ -1509,6 +1648,7 @@ function deliverJson(tip, ws) {
         how: ws.how,
         autoPicked: ws.autoPicked,
         logFile: logPath(),
+        sessionTipFile: sessionTipPath(),
       },
       null,
       2,
@@ -1533,27 +1673,30 @@ Usage:
 
 Tip options:
   --cwd DIR              workspace (default: $PWD)
-  --channel terminal|macos|both|json
+  --channel terminal|macos|windows|desktop|both|json
   --notify toast|banner|dialog
   --interval|-i 30m      gap between tips for this run (or set permanently via interval cmd)
   --force                ignore cooldown
   --include-git-commits  allow raw commit subjects as tips (off by default — usually noise)
-  --reason session-start quiet-fail for hooks
+  --reason session-start quiet-fail for hooks; also writes ~/.tips/session-tip.md for agents
 
 How often tips show (gap per repo):
   5m  15m  30m(default)  1h  2h  6h  1d  off
   Set:  node poc/codelore.mjs interval 1h
   See:  node poc/codelore.mjs config
 
-Toast on-screen (not the gap): critical 16s · gotcha 12s · tip 8s (hover pauses)
+Toast on-screen (not the gap): critical 16s · gotcha 12s · tip 8s
+  macOS: floating panel (poc/bin/codelore-toast) · Windows: Action Center toast
 
 Config files (local only):
   ~/.tips/config.json    watchMode, interval, flags
   ~/.tips/tips-log.md    every tip shown
+  ~/.tips/session-tip.md last tip for agent IDEs (Grok ignores SessionStart stdout)
   <repo>/.codelore/tips  your curated packs (preferred over auto)
 
-SessionStart:
+SessionStart (Claude / Grok):
   node .../codelore.mjs tip --reason session-start --channel both --notify toast --cwd "$PWD"
+  # Windows Grok: also see docs/grok-windows.md
 `);
 }
 
@@ -1814,14 +1957,28 @@ async function main() {
     const shaped = toTwoLines(tip);
 
     const ch = args.channel;
+    // Always write agent-readable session tip (Grok/Cursor SessionStart stdout is ignored).
+    try {
+      writeSessionTipFile(shaped, ws);
+    } catch {
+      /* never block tip delivery */
+    }
+
     if (ch === "json") deliverJson(shaped, ws);
     else {
       if (ch === "terminal" || ch === "both")
         deliverTerminal(shaped, ws, args.plain);
-      if (ch === "macos" || ch === "both") {
-        const result = deliverMacos(shaped, ws, args.notifyStyle || "toast");
+      // desktop = platform toast only; both = terminal + desktop
+      // macos/windows kept as aliases for scripts/docs
+      const wantDesktop =
+        ch === "both" ||
+        ch === "desktop" ||
+        ch === "macos" ||
+        ch === "windows";
+      if (wantDesktop) {
+        const result = deliverDesktop(shaped, ws, args.notifyStyle || "toast");
         reportNotifyResult(result, quietFail);
-        if (!result.ok && ch === "macos") {
+        if (!result.ok && (ch === "macos" || ch === "windows" || ch === "desktop")) {
           deliverTerminal(shaped, ws, args.plain);
         }
       }

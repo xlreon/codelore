@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:\\\\Users\\\\YOU\\\\code\\\\codelore\\\\poc\\\\codelore.mjs\" tip --reason session-start --channel both --cwd \"%CD%\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
