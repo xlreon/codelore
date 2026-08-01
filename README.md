@@ -6,8 +6,8 @@ When an AI coding session opens, CodeLore:
 
 1. Detects which codebase you’re in (or the most-used repo under a multi-project parent)
 2. Surfaces **one high-signal tip** from curated local packs and/or auto-extracted rules (CLAUDE.md, AGENTS.md, recent git)
-3. Shows it as a **full-width terminal banner** and a **non-blocking macOS toast** (× to dismiss, hover pauses)
-4. Logs every tip to `~/.tips/tips-log.md`
+3. Shows it as a **full-width terminal banner** plus a **desktop toast** (macOS floating panel · Windows Action Center top-right)
+4. Writes `~/.tips/session-tip.md` for agent IDEs (Grok ignores SessionStart stdout) and logs every tip to `~/.tips/tips-log.md`
 
 Tip **data stays local** (your packs, your history). This package ships the tool only.
 
@@ -29,20 +29,24 @@ node poc/codelore.mjs select --cwd ~/code --all
 # Tip for current directory
 node poc/codelore.mjs tip --cwd "$PWD" --force
 
-# Terminal + macOS toast
+# Terminal + desktop toast (macOS panel / Windows Action Center)
 node poc/codelore.mjs tip --cwd "$PWD" --channel both --notify toast --force
 
 # History
 node poc/codelore.mjs log
 ```
 
-### macOS toast (optional)
+### Desktop toast
+
+**macOS** (optional floating panel with ×):
 
 ```bash
 bash poc/macos/build.sh   # requires Xcode CLI tools / swiftc
 ```
 
-Produces `poc/bin/codelore-toast` — floating non-activating panel (top-right, ×, full text, no focus steal).
+Produces `poc/bin/codelore-toast` — non-activating top-right panel.
+
+**Windows** (built-in, no build step): `poc/windows/show-toast.ps1` shows an Action Center toast (top-right). Allow notifications for PowerShell/Terminal if nothing appears. See [docs/grok-windows.md](docs/grok-windows.md).
 
 ## Claude Code SessionStart
 
@@ -64,12 +68,33 @@ Add to `~/.claude/settings.json`:
 
 Hooks quiet-fail so a broken install never blocks a session.
 
+## Grok Build SessionStart (Windows / cross-platform)
+
+Grok does **not** render SessionStart stdout in a corner widget. Use desktop toast + the session tip file:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node C:\\\\ABSOLUTE\\\\PATH\\\\TO\\\\codelore\\\\poc\\\\codelore.mjs tip --reason session-start --channel both --cwd \"%CD%\"",
+        "timeout": 20
+      }]
+    }]
+  }
+}
+```
+
+Place under `~/.grok/hooks/codelore-session-start.json`. Full Windows setup: [docs/grok-windows.md](docs/grok-windows.md).
+
 ## Local files (never shipped in this repo)
 
 | Path | Purpose |
 |------|---------|
 | `~/.tips/config.json` | Watch list (`all` or selected dirs) |
 | `~/.tips/tips-log.md` | Append-only log of every tip shown |
+| `~/.tips/session-tip.md` | Last tip for agent IDEs (Grok/Cursor) |
 | `~/.codelore/state/` | Per-repo seen / cooldown |
 | `<your-repo>/.codelore/tips/*.json` | **Your** curated tip packs (private) |
 
@@ -92,8 +117,9 @@ Working POC:
 
 - Multi-repo detection + mandated directory select  
 - Curated packs + filtered auto tips (docs/git)  
-- Terminal full-width banner + macOS toast  
-- SessionStart integration  
+- Terminal full-width banner + macOS toast + **Windows Action Center toast**  
+- SessionStart integration (Claude + Grok) + `session-tip.md` for agents  
+- UTF-8 BOM-safe config load (Windows PowerShell)  
 
 Not yet: npm publish, YAML packs, harvest/approve CLI, full test suite.
 
